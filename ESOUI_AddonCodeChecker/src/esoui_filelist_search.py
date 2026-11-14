@@ -402,7 +402,7 @@ def annotate_depends_on_line(
     lb, rb = chr(91), chr(93)
     stripped = raw_line.strip()
     if ":" not in stripped:
-        return f"-- {stripped}", False
+        return stripped, False
 
     header, rhs = stripped.split(":", 1)
     tokens = rhs.split()
@@ -428,4 +428,4 @@ def annotate_depends_on_line(
         else:
             annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
 
-    return f"-- {header.strip()}: {' '.join(annotated_tokens)}", has_issue
+    return f"{header.strip()}: {' '.join(annotated_tokens)}", has_issue

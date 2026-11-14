@@ -1,5 +1,5 @@
 """
-ZIP-Strukturprüfung, MMOUI-Filelist-Orchestrierung, Ollama-AI-Review und BBCode-Report-Generierung.
+ZIP-Strukturprüfung, MMOUI-Filelist-Orchestrierung, Ollama-AI-Review und kompaktes BBCode-Reporting.
 """
 
 import concurrent.futures
@@ -25,6 +25,7 @@ from src.esoui_config import (
     ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
     ESOUI_BATCH_CHUNK_SIZE,
     ESOUI_LATEST_MAX_ITEMS,
+    ESOUI_UPLOAD_RULES_URL,
     EXTRACT_FOLDER,
     FORBIDDEN_KEYWORDS,
     FORBIDDEN_OS_JUNK_NAMES,
@@ -41,14 +42,13 @@ from src.esoui_filelist_search import (
     lookup_addon_metadata,
     search_addons,
 )
-from src.esoui_ram_index import build_esoui_index_once, is_index_built
 from src.esoui_lua_analyzer import (
     BATCH_BEST_PRACTICE_TRACKER,
     BATCH_LEAK_TRACKER,
     collect_addon_context,
 )
 from src.esoui_manifest_xml_analyzer import analyze_file_content
-
+from src.esoui_ram_index import build_esoui_index_once, is_index_built
 
 try:
     from esoui_rules_bestpractice import CUSTOM_RULES
@@ -65,7 +65,7 @@ def print_addon_metadata(addon_id, force_refresh=False):
         meta = lookup_addon_metadata(addon_id, force=force_refresh)
         if meta:
             print(
-                f"{C.CYAN}-> Addon Info [{C.WHITE}{meta['addon_id']}{C.CYAN}]: "
+                f"{C.CYAN}-> Addon Info {chr(91)}{C.WHITE}{meta['addon_id']}{C.CYAN}{chr(93)}: "
                 f"{C.WHITE}{meta['title']}{C.CYAN} | v{C.WHITE}{meta['version'] or '?'}{C.CYAN} | "
                 f"by {C.WHITE}{meta['author'] or '?'}{C.CYAN} | API: {C.WHITE}{meta['api_version'] or '?'}{C.RESET}"
             )
@@ -74,6 +74,21 @@ def print_addon_metadata(addon_id, force_refresh=False):
             print(f"{C.YELLOW}[FILELIST-DEBUG] Metadata lookup failed for ID {addon_id}: {e}{C.RESET}")
 
 
+def _extract_entry_api_display(item):
+    sub_addons = item.get("addons")
+    if isinstance(sub_addons, list):
+        apis = []
+        for sub in sub_addons:
+            if isinstance(sub, dict):
+                av = str(sub.get("apiVersion") or "").strip()
+                if av and av not in apis:
+                    apis.append(av)
+        if apis:
+            return ", ".join(apis)
+    api_val = item.get("apiversion") or item.get("apiVersion") or item.get("compatible") or "?"
+    if isinstance(api_val, list):
+        return ", ".join(str(x) for x in api_val)
+    return str(api_val)
 def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force_download=False):
     """Downloads and checks selected filelist entries [(rank_idx, entry_dict), ...] in chunks."""
     if chunk_size is None:
@@ -100,16 +115,14 @@ def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force
         for offset, (rank, item) in enumerate(chunk, 1):
             global_idx = chunk_start + offset
             addon_id = str(item.get("id") or item.get("UID") or item.get("addon_id") or "").strip()
-            title_text = str(item.get("title") or item.get("name") or "Unknown Addon").strip()
-            author_text = str(item.get("author") or item.get("authorName") or "?").strip()
-            version_text = str(item.get("version") or "?").strip()
-            api_val = item.get("apiversion") or item.get("apiVersion") or item.get("compatible") or "?"
-            if isinstance(api_val, list):
-                api_val = ", ".join(str(x) for x in api_val)
+            title_text = str(item.get("title") or item.get("UIName") or item.get("name") or "Unknown Addon").strip()
+            author_text = str(item.get("author") or item.get("UIAuthorName") or "?").strip()
+            version_text = str(item.get("version") or item.get("UIVersion") or "?").strip()
+            api_val = _extract_entry_api_display(item)
             dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
 
             print(
-                f"{C.CYAN}[{global_idx}/{total_selected} | #{rank}]{C.RESET} "
+                f"{C.CYAN}{chr(91)}{global_idx}/{total_selected} | #{rank}{chr(93)}{C.RESET} "
                 f"{C.WHITE}{title_text}{C.RESET} v{version_text} by {author_text} "
                 f"(ID: {addon_id}, API: {api_val})"
             )
@@ -126,6 +139,8 @@ def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force
 
     elapsed = (datetime.now() - t0).total_seconds()
     print(f"{C.CYAN}=== '{mode_label}' finished ({C.WHITE}{total_selected}{C.CYAN} addons) in {C.MAGENTA}{elapsed:.2f} seconds{C.CYAN}. ==={C.RESET}\n")
+
+
 def process_latest_filelist_in_chunks(selected_ranks, raw_spec_label=None, chunk_size=None, force_download=False):
     """Fetches top 200 live addons from filelist.json sorted by lastUpdate and processes selected_ranks."""
     if isinstance(selected_ranks, int):
@@ -157,8 +172,6 @@ def process_latest_filelist_in_chunks(selected_ranks, raw_spec_label=None, chunk
         chunk_size=chunk_size,
         force_download=force_download,
     )
-
-
 def handle_search_command(raw_search_args, force_download=False, auto_select_spec=None):
     """Handles 'search <q1, q2>', 'search dep <d1, d2>', 'search author <a1, a2>', and 'search api <v1, !v2>' via filelist.json."""
     query_part = (raw_search_args or "").strip()
@@ -168,7 +181,7 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
             f"   - search LibAddonMenu, Master Merchant\n"
             f"   - search dep LibStub, LibAddonMenu-2.0\n"
             f"   - search author Baertram, sirinsidiator\n"
-            f"   - search api 101043 (or 'search api !101043' for outdated addons){C.RESET}"
+            f"   - search api 101051 (or 'search api !101051' for outdated addons){C.RESET}"
         )
         return
 
@@ -193,11 +206,10 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         mode_prefix = "api "
         query_part = query_part[3:].strip()
         if not query_part:
-            print(f"{C.RED}-> Error: Missing API version(s) after 'search api'. Example: 'search api 101043' or 'search api !101043'{C.RESET}")
+            print(f"{C.RED}-> Error: Missing API version(s) after 'search api'. Example: 'search api 101051' or 'search api !101051'{C.RESET}")
             return
 
     mode_labels = {"all": "Title/Author/ID", "dep": "Dependencies", "author": "Author", "api": "API Version"}
-
     print(f"\n{C.CYAN}[SEARCH] Searching {mode_labels[search_mode]} for '{C.WHITE}{query_part}{C.CYAN}'...{C.RESET}")
     try:
         hits, stage_used = search_addons(query_part, search_mode=search_mode, force=force_download)
@@ -214,19 +226,17 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
 
     for idx, item in enumerate(hits, 1):
         addon_id = str(item.get("id") or item.get("UID") or item.get("addon_id") or "").strip()
-        title_text = str(item.get("title") or item.get("name") or "Unknown").strip()
-        author_text = str(item.get("author") or item.get("authorName") or "?").strip()
-        version_text = str(item.get("version") or "?").strip()
-        api_val = item.get("apiversion") or item.get("apiVersion") or item.get("compatible") or "?"
-        if isinstance(api_val, list):
-            api_val = ", ".join(str(x) for x in api_val)
+        title_text = str(item.get("title") or item.get("UIName") or "Unknown").strip()
+        author_text = str(item.get("author") or item.get("UIAuthorName") or "?").strip()
+        version_text = str(item.get("version") or item.get("UIVersion") or "?").strip()
+        api_val = _extract_entry_api_display(item)
         print(
-            f"  {C.WHITE}[{idx:>3}]{C.RESET} {C.BOLD}{title_text}{C.RESET} "
+            f"  {C.WHITE}{chr(91)}{idx:>3}{chr(93)}{C.RESET} {C.BOLD}{title_text}{C.RESET} "
             f"(ID: {C.CYAN}{addon_id}{C.RESET} | v{version_text} | by {author_text} | API: {api_val})"
         )
 
     sel_input = auto_select_spec if auto_select_spec is not None else read_cli_input_with_esc(
-        f"\nSelect result number(s) to check (e.g. '1', '1-3', '2, 5', 'all', or Enter/ESC to cancel): "
+        "\nSelect result number(s) to check (e.g. '1', '1-3', '2, 5', 'all', or Enter/ESC to cancel): "
     ).strip()
 
     if not sel_input or sel_input == "__ESC__" or sel_input.lower() in ("cancel", "exit", "0"):
@@ -247,17 +257,64 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         mode_label=f"search {mode_prefix}{query_part} [{sel_input}]",
         force_download=force_download,
     )
-def _check_zip_structure(zip_path, report):
-    """Inspects all ZIP archive entries against allowed/blocked extensions and hidden/OS junk rules."""
+def _build_bbcode_zip_list(namelist, flagged_paths):
+    """Builds a nested vBulletin [SIZE="2"][list]...[/list][/SIZE] tree marking flagged items with :mad:."""
+    lb, rb = chr(91), chr(93)
+    tree = {}
+    flagged_norm = {p.replace("\\", "/").rstrip("/") for p in flagged_paths}
+
+    for entry in namelist:
+        norm = entry.replace("\\", "/").strip("/")
+        if not norm:
+            continue
+        parts = norm.split("/")
+        node = tree
+        for idx, part in enumerate(parts):
+            is_leaf_file = (idx == len(parts) - 1) and not entry.endswith("/")
+            if part not in node:
+                node[part] = None if is_leaf_file else {}
+            elif node[part] is None and not is_leaf_file:
+                node[part] = {}
+            if not is_leaf_file:
+                node = node[part]
+
+    out_lines = [f'{lb}SIZE="2"{rb}{lb}list{rb}']
+
+    def _walk(sub_tree, parent_path=""):
+        items = sorted(sub_tree.items(), key=lambda kv: (kv[-1] is None, next(iter(kv)).lower()))
+        for name, child in items:
+            curr_path = f"{parent_path}/{name}" if parent_path else name
+            display_name = f"{name}/" if child is not None else name
+            is_bad = (curr_path in flagged_norm) or any(
+                curr_path.startswith(fp + "/") for fp in flagged_norm
+            )
+            if is_bad:
+                out_lines.append(f'{lb}*{rb} {lb}color="Red"{rb}:mad: {display_name}{lb}/color{rb}')
+            else:
+                out_lines.append(f"{lb}*{rb} {display_name}")
+            if child is not None:
+                out_lines.append(f"{lb}list{rb}")
+                _walk(child, curr_path)
+                out_lines.append(f"{lb}/list{rb}")
+
+    _walk(tree)
+    out_lines.append(f"{lb}/list{rb}{lb}/SIZE{rb}")
+    return "\n".join(out_lines)
+
+
+def _check_zip_structure(zip_path, report_data):
+    """Inspects all ZIP archive entries and populates report_data['zip_tree_bbcode'] & violations."""
     forbidden_entries = []
     disallowed_by_ext = defaultdict(list)
     dds_textures = []
     non_addon_files = []
+    flagged_paths = set()
     seen_hidden_dirs = set()
 
     try:
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            for entry in zip_ref.namelist():
+            all_entries = zip_ref.namelist()
+            for entry in all_entries:
                 normalized = entry.replace('\\', '/')
                 parts = [p for p in normalized.split('/') if p]
                 if not parts:
@@ -312,7 +369,6 @@ def _check_zip_structure(zip_path, report):
 
                 if not is_doc_or_license and entry_ext not in ALLOWED_EXTENSIONS:
                     disallowed_by_ext[entry_ext].append(normalized)
-
             if dds_textures:
                 print(f"    ├── {C.CYAN}Textures (.dds) found ({len(dds_textures)}):{C.RESET}")
                 for tex in sorted(dds_textures):
@@ -324,7 +380,7 @@ def _check_zip_structure(zip_path, report):
                 has_any_critical = any(is_crit for _, is_crit in non_addon_files)
                 header_color = C.RED if has_any_critical else C.YELLOW
                 print(f"    └── {header_color}Non-addon-relevant / forbidden items found ({len(non_addon_files)}):{C.RESET}")
-                for nf, is_crit in sorted(non_addon_files, key=lambda x: x[0]):
+                for nf, is_crit in sorted(non_addon_files, key=lambda x: x):
                     if is_crit:
                         print_wrapped_tree_item(f"- [CRITICAL] {nf}", color=C.RED)
                     else:
@@ -332,48 +388,26 @@ def _check_zip_structure(zip_path, report):
             else:
                 print(f"    └── {C.GREEN}Non-addon-relevant / forbidden items: None{C.RESET}")
 
-            report.write("--- [ZIP Archive Structure Analysis] ---\n")
-            if non_addon_files:
-                report.write(f"[NON-ADDON-RELEVANT / FORBIDDEN ITEMS - {len(non_addon_files)} item(s)]\n")
-                for nf, is_crit in sorted(non_addon_files, key=lambda x: x[0]):
-                    prefix = "[CRITICAL] " if is_crit else ""
-                    report.write(f"  - {prefix}{nf}\n")
-                report.write("\n")
+            for fe in forbidden_entries:
+                flagged_paths.add(fe)
+            for files in disallowed_by_ext.values():
+                for f_item in files:
+                    flagged_paths.add(f_item)
 
-            if forbidden_entries or disallowed_by_ext:
-                report.write("[STATUS] FAIL\n[CRITICAL VIOLATIONS]\n")
-                if forbidden_entries:
-                    report.write("  - Hidden, OS-metadata, or development folders/files found:\n")
-                    for entry in sorted(set(forbidden_entries)):
-                        report.write("    " + entry + "\n")
-                for ext, files in disallowed_by_ext.items():
-                    report.write("  - Disallowed file extension " + ext + ":\n")
-                    for entry in files:
-                        report.write("    " + entry + "\n")
-            else:
-                report.write("[STATUS] PASS\n")
-            report.write("\n" + "=" * 50 + "\n\n")
+            report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(all_entries, flagged_paths)
+
+            if forbidden_entries:
+                report_data["zip_violations"].append("Hidden, OS-metadata, or development folders/files found")
+            for ext, files in disallowed_by_ext.items():
+                report_data["zip_violations"].append(f"Disallowed file extension '{ext}' found ({len(files)} file(s))")
+            for nf, is_crit in non_addon_files:
+                if not is_crit:
+                    report_data["best_practices"]["Possible action: Non-addon-relevant / unreferenced manifest file"].append((nf, None, ""))
     except Exception as e:
         print(f"    └── {C.RED}[ERROR] Failed to read ZIP structure: {str(e)}{C.RESET}")
-        report.write("Failed to read ZIP structure: " + str(e) + "\n\n")
+        report_data["zip_violations"].append(f"Failed to read ZIP structure: {str(e)}")
 
 
-def _write_ram_tracker_fallback(report, target_files=None):
-    """Writes unverified globals from BATCH_LEAK_TRACKER for all or specific files."""
-    items = BATCH_LEAK_TRACKER.items() if target_files is None else [
-        (f, BATCH_LEAK_TRACKER.get(f, [])) for f in target_files
-    ]
-    for rel_file_path, leaks in items:
-        report.write(f"--- [File: {rel_file_path}] ---\n")
-        if leaks:
-            report.write("[STATUS] WARN\n[CRITICAL VIOLATIONS]\n")
-            report.write("  - Unverified Globals found (Not in API-Doc / Custom-Stubs):\n")
-            for index, leak in enumerate(leaks, 1):
-                report.write(f"    {index}. {leak}\n")
-            report.write("[BEST PRACTICE SUGGESTIONS] If these are valid variables, please add them to your 'eso-api_base_Manual_NonGenerated.lua' file.\n\n")
-        else:
-            report.write("[STATUS] PASS\n\n")
-        report.write("--------------------------------------------------\n\n")
 def _ensure_ollama_and_model_ready(model_name):
     """Checks if Ollama is installed, starts the server if inactive, and warms up the LLM."""
     global OLLAMA_PREFLIGHT_CACHE
@@ -433,80 +467,40 @@ def _ensure_ollama_and_model_ready(model_name):
     except Exception as list_err:
         return False, f"Could not query installed Ollama models: {list_err}"
 
-    try:
-        ps_resp = client.ps()
-        running_models = ps_resp.get("models", []) if isinstance(ps_resp, dict) else getattr(ps_resp, "models", [])
-        is_loaded = any(
-            (rm.get("model") or rm.get("name") if isinstance(rm, dict) else getattr(rm, "model", None) or getattr(rm, "name", None))
-            in (model_name, target_short + ":latest")
-            for rm in running_models
-        )
-        if is_loaded:
-            print(f"    │     {C.GREEN}[OK]{C.RESET} LLM '{model_name}' is already loaded in memory.")
-        else:
-            print(f"    │     {C.CYAN}⚙ Loading LLM '{model_name}' into memory...{C.RESET}")
-            load_start = time.perf_counter()
-            client.generate(model=model_name, prompt="", keep_alive="10m")
-            load_ms = (time.perf_counter() - load_start) * 1000
-            print(f"    │     {C.GREEN}[OK]{C.RESET} LLM '{model_name}' loaded and active ({C.MAGENTA}{load_ms:.0f} ms{C.RESET}).")
-    except Exception:
-        pass
-
     OLLAMA_PREFLIGHT_CACHE = (True, "Ready")
     return OLLAMA_PREFLIGHT_CACHE
 
 
-def _run_ai_code_review(addon_code_bundle, report):
-    """Reviews each queued file individually with Ollama using configurable context and template rules."""
-    if BATCH_BEST_PRACTICE_TRACKER:
-        report.write("--- [Local Static Best Practice Report] ---\n")
-        for rel_file_path, suggestions in BATCH_BEST_PRACTICE_TRACKER.items():
-            report.write(f"--- [File: {rel_file_path}] ---\n[BEST PRACTICE SUGGESTIONS]\n")
-            for s in suggestions:
-                report.write("  - " + s + "\n")
-            report.write("\n--------------------------------------------------\n\n")
-
+def _run_ai_code_review(addon_code_bundle):
+    """Reviews queued files sequentially with Ollama and returns parsed AI findings [(rel_path, status, crit_lines, bp_lines)]."""
+    ai_findings = []
     if not addon_code_bundle:
         print(f"  {C.GREEN}✔ All files passed local pre-checks. Skipping AI review!{C.RESET}")
-        return
+        return ai_findings
 
-    report.write("--- [Unified AI Code Review Report] ---\n")
     ai_ready, status_reason = _ensure_ollama_and_model_ready(MODEL_NAME)
     if not ai_ready:
         print(f"  {C.YELLOW}⚠ AI review skipped: {status_reason} Using RAM tracker fallback...{C.RESET}")
-        _write_ram_tracker_fallback(report)
-        return
+        return ai_findings
 
     total_files = len(addon_code_bundle)
-    banner_msg = f"[AI REVIEW] Reviewing {total_files} file(s) sequentially with Ollama ({MODEL_NAME}) [Timeout: {AI_TIMEOUT_SECONDS}s/file]..."
-    box_inner_width = len(banner_msg) + 4
-    print(f"\n  {C.BLUE}{C.BOLD}╔{'═' * box_inner_width}╗{C.RESET}")
-    print(f"  {C.BLUE}{C.BOLD}║  {banner_msg}  ║{C.RESET}")
-    print(f"  {C.BLUE}{C.BOLD}╚{'═' * box_inner_width}╝{C.RESET}")
+    print(f"\n  {C.BLUE}{C.BOLD}[AI REVIEW] Reviewing {total_files} file(s) with Ollama ({MODEL_NAME})...{C.RESET}")
 
-    max_chars_per_file = 42000
     for idx, file_block in enumerate(addon_code_bundle, 1):
         lines = file_block.splitlines()
         first_line = next(iter(lines), "")
         rel_path = first_line.replace("### START_FILE:", "").strip() or f"file_{idx}"
-        print(f"\n  {C.CYAN}[AI {idx}/{total_files}]{C.RESET} Reviewing {C.BOLD}{rel_path}{C.RESET}...")
+        print(f"  {C.CYAN}[AI {idx}/{total_files}]{C.RESET} Reviewing {C.BOLD}{rel_path}{C.RESET}...")
 
-        review_payload = file_block
-        if len(review_payload) > max_chars_per_file:
-            review_payload = review_payload[:22000] + "\n\n-- [... MIDDLE SECTION TRUNCATED FOR CONTEXT LIMIT ...] --\n\n" + review_payload[-18000:]
-
+        review_payload = file_block[:42000]
         prompt = (
             f"You are a strict, silent code reviewer for Elder Scrolls Online addons.\n"
             f"Review the single file below against these rules:\n{CUSTOM_RULES}\n\n"
             f"FILE TO REVIEW:\n\"\"\"\n{review_payload}\n\"\"\"\n\n"
-            f"STRICT OUTPUT INSTRUCTIONS (DO NOT IGNORE):\n"
-            f"- NEVER output JSON, markdown code fences (```), introductions, or explanations.\n"
-            f"- If the file has NO violations AND NO suggestions, output ONLY these 2 lines:\n"
-            f"--- [File: {rel_path}] ---\n[STATUS] PASS\n\n"
-            f"- Otherwise, output ONLY this exact plain-text template:\n"
+            f"Output ONLY plain text using:\n"
             f"--- [File: {rel_path}] ---\n[STATUS] PASS or FAIL\n"
-            f"[CRITICAL VIOLATIONS] None OR itemized list of real violations\n"
-            f"[BEST PRACTICE SUGGESTIONS] None OR itemized list of real suggestions\n"
+            f"[CRITICAL VIOLATIONS] None OR itemized list\n"
+            f"[BEST PRACTICE SUGGESTIONS] None OR itemized list\n"
         )
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -519,133 +513,145 @@ def _run_ai_code_review(addon_code_bundle, report):
             )
         )
         start_wait = time.perf_counter()
-
         try:
-            timed_out = False
             while not future.done():
-                elapsed_sec = int(time.perf_counter() - start_wait)
-                if elapsed_sec >= AI_TIMEOUT_SECONDS:
+                if int(time.perf_counter() - start_wait) >= AI_TIMEOUT_SECONDS:
                     future.cancel()
                     executor.shutdown(wait=False, cancel_futures=True)
-                    timed_out = True
-                    break
-                print(f"\r    ├── {C.CYAN}⏳ Waiting for Ollama... ({elapsed_sec}s / {AI_TIMEOUT_SECONDS}s){C.RESET}", end="", flush=True)
+                    raise TimeoutError("AI review timed out")
                 time.sleep(0.5)
-
-            elapsed_ms = (time.perf_counter() - start_wait) * 1000
-            print("\r" + " " * 75 + "\r", end="", flush=True)
-            print(f"    ├── {C.CYAN}AI review took {C.MAGENTA}{elapsed_ms:.2f} ms{C.RESET}")
-
-            if timed_out:
-                print(f"    └── {C.YELLOW}⚠ Timed out after {AI_TIMEOUT_SECONDS}s. Using RAM tracker fallback...{C.RESET}")
-                _write_ram_tracker_fallback(report, target_files=[rel_path])
-                continue
-
             response = future.result()
             executor.shutdown(wait=False)
-            ai_response = response.get('response', '').strip()
-            if ai_response.startswith("```"):
-                ai_response = re.sub(r'^```[a-zA-Z]*\n?', '', ai_response)
-                ai_response = re.sub(r'\n?```$', '', ai_response).strip()
-
-            invalid_template = (
-                "I'm sorry" in ai_response
-                or "assist with that request" in ai_response
-                or ai_response.startswith("{")
-                or "--- [File:" not in ai_response
-                or "[STATUS]" not in ai_response
-                or len(ai_response) < 10
-            )
-            if invalid_template:
-                print(f"    └── {C.YELLOW}⚠ AI returned invalid format/JSON. Using RAM tracker fallback...{C.RESET}")
-                _write_ram_tracker_fallback(report, target_files=[rel_path])
-            else:
-                print(f"    └── {C.GREEN}✔ AI review completed.{C.RESET}")
-                report.write(ai_response + "\n\n--------------------------------------------------\n\n")
+            ai_response = response.get("response", "").strip()
+            if "--- [File:" in ai_response and "[STATUS]" in ai_response:
+                ai_findings.append((rel_path, ai_response))
         except Exception as e:
             executor.shutdown(wait=False)
-            print(f"    └── {C.RED}✖ AI Execution Error: {str(e)}{C.RESET}")
-            _write_ram_tracker_fallback(report, target_files=[rel_path])
+            print(f"    └── {C.YELLOW}⚠ AI fallback for {rel_path}: {e}{C.RESET}")
 
+    return ai_findings
+def _parse_findings_into_report_data(rel_path, category, raw_result, report_data):
+    """Extracts critical violations and best-practice items from an analyzer result into grouped buckets."""
+    rel_norm = rel_path.replace("\\", "/")
+    section = None
+    for line in raw_result.splitlines():
+        s = line.strip()
+        if s == "[CRITICAL VIOLATIONS]":
+            section = "crit"
+            continue
+        if s == "[BEST PRACTICE SUGGESTIONS]":
+            section = "bp"
+            continue
+        if s.startswith("[STATUS]") or s == "None" or not s:
+            continue
 
-def _apply_bbcode_report_styling(report_file_path):
-    """Formats the finalized plain-text report into ESOUI forum BBCode with list and spoiler tags."""
-    lb, rb = chr(91), chr(93)
-    try:
-        with open(report_file_path, "r", encoding="utf-8") as rf:
-            styled_report = rf.read()
-
-        styled_report = re.sub(r'^[=-]{10,}\s*\n?', '', styled_report, flags=re.MULTILINE)
-        styled_report = re.sub(r'^===\s*END OF REPORT\s*===\s*\n?', '', styled_report, flags=re.MULTILINE)
-        styled_report = re.sub(
-            r'^---\s*(\[ZIP Archive Structure Analysis\])\s*---',
-            rf'{lb}u{rb}{lb}b{rb}Report results - Please review and fix where applicable{lb}/b{rb}{lb}/u{rb}\n\n{lb}u{rb}{lb}b{rb}\1{lb}/b{rb}{lb}/u{rb}',
-            styled_report,
-            flags=re.MULTILINE,
-        )
-        styled_report = re.sub(r'^---\s*(\[[^\]]+\])\s*---', rf'{lb}u{rb}\1{lb}/u{rb}', styled_report, flags=re.MULTILINE)
-        styled_report = re.sub(r'^\[STATUS\]\s+FAIL\b', f'{lb}STATUS{rb} {lb}color="Red"{rb}FAIL{lb}/color{rb}', styled_report, flags=re.MULTILINE)
-        styled_report = re.sub(r'^\[STATUS\]\s+PASS(?:ED)?\b', f'{lb}STATUS{rb} {lb}color="Green"{rb}PASS{lb}/color{rb}', styled_report, flags=re.MULTILINE)
-        styled_report = re.sub(
-            r'^\[CRITICAL VIOLATIONS\]\s*\n(\s+- )',
-            rf'{lb}color="Red"{rb}{lb}CRITICAL VIOLATIONS{rb}{lb}/color{rb}\n\1',
-            styled_report,
-            flags=re.MULTILINE,
-        )
-        styled_report = re.sub(
-            r'^\[BEST PRACTICE SUGGESTIONS\]\s+None\b',
-            f'{lb}BEST PRACTICE SUGGESTIONS{rb} {lb}color="Green"{rb}None{lb}/color{rb}',
-            styled_report,
-            flags=re.MULTILINE,
-        )
-        styled_report = re.sub(
-            r'^\[NON-ADDON-RELEVANT / FORBIDDEN ITEMS\s*-\s*(\d+\s*item\(s\))\]',
-            rf'{lb}color="Red"{rb}{lb}NON-ADDON-RELEVANT / FORBIDDEN:{lb}/color{rb} \1{lb}color="Red"{rb}{rb}{lb}/color{rb}',
-            styled_report,
-            flags=re.MULTILINE,
-        )
-
-        formatted_lines = []
-        in_bb_list = False
-        in_spoiler = False
-        for line in styled_report.splitlines():
-            bullet_match = re.match(r'^\s{1,4}-\s+(.*)$', line)
-            is_continuation = in_bb_list and bool(re.match(r'^\s{4,}\S', line))
-            if bullet_match:
-                if in_spoiler:
-                    formatted_lines.append(f"{lb}/spoiler{rb}")
-                    in_spoiler = False
-                if not in_bb_list:
-                    formatted_lines.append(f"{lb}list{rb}")
-                    in_bb_list = True
-                formatted_lines.append(f"{lb}*{rb} {bullet_match.group(1)}")
-            elif is_continuation:
-                if not in_spoiler:
-                    formatted_lines.append(f"{lb}spoiler{rb}")
-                    in_spoiler = True
-                formatted_lines.append(line)
+        if section == "crit" and s.startswith("- "):
+            item_text = s[2:].strip()
+            line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
+            line_no = line_match.group(1) if line_match else None
+            code_match = re.search(r'\((--[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
+            raw_code = code_match.group(1).strip() if code_match else ""
+            code_comment = re.sub(r'^--\s*', '', raw_code)
+            rule_title = re.sub(r'\s*\((?:at\s+)?line\s+\d+\)|\s+at\s+line\s+\d+', '', item_text, flags=re.IGNORECASE)
+            if code_match:
+                rule_title = rule_title[:rule_title.rfind("(")].strip().rstrip(":")
             else:
-                if in_spoiler:
-                    formatted_lines.append(f"{lb}/spoiler{rb}")
-                    in_spoiler = False
-                if in_bb_list:
-                    formatted_lines.append(f"{lb}/list{rb}")
-                    in_bb_list = False
-                formatted_lines.append(line)
-        if in_spoiler:
-            formatted_lines.append(f"{lb}/spoiler{rb}")
-        if in_bb_list:
-            formatted_lines.append(f"{lb}/list{rb}")
+                rule_title = next(iter(rule_title.split(":", 1))).strip()
+            report_data["critical"][category][rule_title].append((rel_norm, line_no, code_comment))
 
-        with open(report_file_path, "w", encoding="utf-8") as wf:
-            wf.write("\n".join(formatted_lines).strip() + "\n")
-    except Exception as bb_err:
-        print(f"  {C.YELLOW}⚠ Could not apply BBCode styling to report: {bb_err}{C.RESET}")
+        elif section == "bp":
+            if s.startswith("- "):
+                bp_header = s[2:].strip()
+                if "without a local reference" in bp_header:
+                    bp_rule = "Possible action: Global variable used multiple times without a local reference"
+                elif "Startup Chat Spam" in bp_header:
+                    bp_rule = "Possible action: Startup Chat Spam Detected (unconditional message on load/player activated)"
+                elif "Manifest .addon found" in bp_header:
+                    bp_rule = "Possible action: Console UI Manifest Notice (.addon used instead of .txt)"
+                else:
+                    bp_rule = "Possible action: " + next(iter(bp_header.split(":", 1))).strip()
+                report_data["_last_bp_rule"] = bp_rule
+                if "Manifest .addon found" in bp_header:
+                    report_data["best_practices"][bp_rule].append((rel_norm, "1", ""))
+            elif report_data.get("_last_bp_rule"):
+                hit_m = re.match(r'^([A-Za-z0-9_]+):(\d+)\s+--\s*(.*)$', s)
+                num_m = re.match(r'^(\d+):\s+--\s*(.*)$', s)
+                if hit_m:
+                    var_n, ln_no, c_txt = hit_m.group(1), hit_m.group(2), hit_m.group(3).strip()
+                    report_data["best_practices"][report_data["_last_bp_rule"]].append((f"{rel_norm}:{ln_no} ({var_n})", None, c_txt))
+                elif num_m:
+                    ln_no, c_txt = num_m.group(1), num_m.group(2).strip()
+                    report_data["best_practices"][report_data["_last_bp_rule"]].append((rel_norm, ln_no, c_txt))
 
 
-def process_addon(zip_path, zip_name):
-    """Coordinates ZIP audit, extraction, static analysis, AI review, and cleanup."""
+def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
+    """Writes the compact, grouped ESOUI BBCode report without any PASS noise."""
     lb, rb = chr(91), chr(93)
+    out = [
+        "Welcome. Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:",
+        f"{lb}url{rb}{ESOUI_UPLOAD_RULES_URL}{lb}/url{rb}",
+        "",
+        "Below you'll find the report for your uploaded zip archive. Only findings requiring attention are listed.",
+        "Please also read the other rules and best practices, especially the AI disclosure and credits parts, and apply them where applicable.",
+        "Thank you very much for supporting our addon quality and compatibility efforts.",
+        "",
+        f'{lb}b{rb}{lb}u{rb}{lb}color="RoyalBlue"{rb}Addon check - report results{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}',
+        f"{lb}b{rb}TIMESTAMP{lb}/b{rb}:    {timestamp_str}",
+        f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}",
+    ]
+
+    if report_data.get("zip_tree_bbcode"):
+        out.append(report_data["zip_tree_bbcode"])
+
+    has_crit = bool(report_data["zip_violations"]) or any(bool(v) for v in report_data["critical"].values())
+    has_bp = bool(report_data["best_practices"])
+
+    if has_crit:
+        out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="Red"{rb}{lb}FONT="Impact"{rb}Critical violations{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+        if report_data["zip_violations"]:
+            out.append("")
+            out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}ZIP Archive{lb}/FONT{rb}{lb}/b{rb}')
+            out.append(f"{lb}list{rb}")
+            for zv in dict.fromkeys(report_data["zip_violations"]):
+                out.append(f"{lb}*{rb} {zv}")
+            out.append(f"{lb}/list{rb}")
+
+        for cat_key, cat_label in (("manifest", "Manifest (.addon / .txt)"), ("lua", "Lua Files"), ("xml", "XML Files")):
+            rules_map = report_data["critical"].get(cat_key)
+            if not rules_map:
+                continue
+            out.append("")
+            out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
+            for rule_title, entries in rules_map.items():
+                out.append(f"{lb}u{rb}{rule_title}{lb}/u{rb}")
+                out.append(f"{lb}list{rb}")
+                for f_path, ln_no, code_txt in entries:
+                    loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                    out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+                out.append(f"{lb}/list{rb}")
+
+    if has_bp:
+        out.append("")
+        out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrange"{rb}{lb}FONT="Impact"{rb}Best practices{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+        for bp_rule, entries in report_data["best_practices"].items():
+            out.append("")
+            out.append(f"{lb}u{rb}{bp_rule}{lb}/u{rb}")
+            out.append(f"{lb}list{rb}")
+            for f_path, ln_no, code_txt in entries:
+                loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+            out.append(f"{lb}/list{rb}")
+
+    if not has_crit and not has_bp:
+        out.append("")
+        out.append(f'{lb}color="Green"{rb}No critical violations or best practice issues found.{lb}/color{rb}')
+
+    with open(report_file_path, "w", encoding="utf-8") as wf:
+        wf.write("\n".join(out).strip() + "\n")
+def process_addon(zip_path, zip_name):
+    """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
     addon_start_time = datetime.now()
     BATCH_LEAK_TRACKER.clear()
     BATCH_BEST_PRACTICE_TRACKER.clear()
@@ -656,6 +662,7 @@ def process_addon(zip_path, zip_name):
 
     os.makedirs(EXTRACT_FOLDER, exist_ok=True)
     now = datetime.now()
+    timestamp_str = now.strftime("%Y-%m-%d %I:%M:%S %p")
     current_date_report_dir = os.path.join(REPORTS_BASE_DIR, now.strftime("%y%m%d"))
     os.makedirs(current_date_report_dir, exist_ok=True)
 
@@ -664,96 +671,105 @@ def process_addon(zip_path, zip_name):
     addon_code_bundle = []
     ai_preflight_triggered = False
 
-    with open(current_report_file, "w", encoding="utf-8") as report:
-        print(f"{C.CYAN}[2/4] Analyzing ZIP structure and extracting archive...{C.RESET}")
-        report.write(f'{lb}u{rb}{lb}color="DarkOrange"{rb}ESOUI ADDON UPLOAD CHECK REPORT{lb}/color{rb}{lb}/u{rb}\n')
-        report.write(f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}\n")
-        report.write(f"{lb}b{rb}TIMESTAMP{lb}/b{rb}:    {now.strftime('%Y-%m-%d %I:%M:%S %p')}\n\n")
-        report.write("Welcome and thank you for your contribution.\n" "
-        report.write("Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:\n")
-        report.write(f"{lb}url{rb}https://esoui.com{lb}/url{rb}\n\n")
-        report.write("Most important: Check the AI disclosure and credits parts, and use/apply them (where applicable)!\n")
-        report.write("Thank you very much for supporting our addon quality and compatibility efforts, acting fair and with respect.\n\n")
-        
-        _check_zip_structure(zip_path, report)
+    report_data = {
+        "zip_tree_bbcode": "",
+        "zip_violations": [],
+        "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+        "best_practices": defaultdict(list),
+    }
 
-        current_extract_dir = os.path.join(EXTRACT_FOLDER, zip_clean_name)
-        if os.path.exists(current_extract_dir):
-            shutil.rmtree(current_extract_dir)
-        os.makedirs(current_extract_dir)
+    print(f"{C.CYAN}[2/4] Analyzing ZIP structure and extracting archive...{C.RESET}")
+    _check_zip_structure(zip_path, report_data)
 
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(current_extract_dir)
+    current_extract_dir = os.path.join(EXTRACT_FOLDER, zip_clean_name)
+    if os.path.exists(current_extract_dir):
+        shutil.rmtree(current_extract_dir)
+    os.makedirs(current_extract_dir)
 
-            print(f"{C.CYAN}[3/4] Running static checks & building AI batch context...{C.RESET}")
-            if not is_index_built():
-                build_esoui_index_once()
-            addon_ctx = collect_addon_context(current_extract_dir)
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(current_extract_dir)
 
-            files_to_process = []
-            for root, _, files in os.walk(current_extract_dir):
-                for file in files:
-                    lower_file = file.lower()
-                    if lower_file.endswith(('.xml', '.lua', '.txt', '.addon')):
-                        file_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(file_path, current_extract_dir)
-                        priority = 0 if lower_file.endswith(('.addon', '.txt')) else (1 if lower_file.endswith('.xml') else 2)
-                        files_to_process.append((priority, rel_path.lower(), file, file_path, rel_path))
+        print(f"{C.CYAN}[3/4] Running static checks & building AI batch context...{C.RESET}")
+        if not is_index_built():
+            build_esoui_index_once()
+        addon_ctx = collect_addon_context(current_extract_dir)
 
-            files_to_process.sort(key=lambda item: (item, item))
-
-            for _, _, file, file_path, rel_path in files_to_process:
+        files_to_process = []
+        for root, _, files in os.walk(current_extract_dir):
+            for file in files:
                 lower_file = file.lower()
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    if lower_file.endswith(('.txt', '.addon')):
-                        if not re.search(r'^\s*##\s*Title\s*:', content, flags=re.MULTILINE | re.IGNORECASE):
-                            continue
-                    print(f"\n  {C.BOLD}[FILE]{C.RESET} {rel_path}")
-                    result = analyze_file_content(rel_path, content, current_extract_dir, addon_ctx)
-                    if result.startswith("[STATUS] FAIL") or result.startswith("[STATUS] PASS"):
-                        is_fail = result.startswith("[STATUS] FAIL")
-                        status_tag = f"{C.RED}[FAIL]{C.RESET}" if is_fail else f"{C.GREEN}[PASS]{C.RESET}"
-                        if not lower_file.endswith('.lua'):
-                            file_label = "XML" if lower_file.endswith('.xml') else "Manifest"
-                            if is_fail:
-                                print(f"    ├── {status_tag} {file_label} check failed:")
-                                in_crit = False
-                                for r_line in result.splitlines():
-                                    stripped_r = r_line.strip()
-                                    if stripped_r == "[CRITICAL VIOLATIONS]":
-                                        in_crit = True
-                                        continue
-                                    if stripped_r.startswith("[BEST PRACTICE"):
-                                        break
-                                    if in_crit and stripped_r.startswith("- "):
-                                        print_wrapped_tree_item(stripped_r, color=C.RED)
-                                print(f"    └── {C.RED}See report for full details.{C.RESET}")
-                            else:
-                                print(f"    └── {status_tag} {file_label} check finished.")
-                        report.write("--- [File: " + rel_path + "] ---\n" + result + "\n\n--------------------------------------------------\n\n")
-                    else:
-                        if lower_file.endswith('.xml'):
-                            print(f"    └── {C.BLUE}[QUEUE FOR AI]{C.RESET} {C.CYAN}XSD valid, queued for semantic XML review.{C.RESET}")
-                        if not ai_preflight_triggered:
-                            ai_preflight_triggered = True
-                            _ensure_ollama_and_model_ready(MODEL_NAME)
-                        clean_lines_for_ai = [line for line in content.splitlines() if line.strip() and not line.strip().startswith("--")]
-                        addon_code_bundle.append("### START_FILE: " + rel_path + "\n\n[SOURCE_CODE]\n" + "\n".join(clean_lines_for_ai) + "\n### END_FILE: " + rel_path + "\n")
-                except Exception as e:
-                    print(f"    └── {C.RED}[ERROR]{C.RESET} {str(e)}")
-                    report.write("--- [File: " + rel_path + "] ---\n[STATUS] ERROR\n[CRITICAL VIOLATIONS] Read Error: " + str(e) + "\n\n")
-        except Exception as e:
-            print(f"  {C.RED}[ERROR] Failed to extract ZIP: {str(e)}{C.RESET}")
-            report.write("Failed to extract ZIP: " + str(e) + "\n\n")
+                if lower_file.endswith(('.xml', '.lua', '.txt', '.addon')):
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, current_extract_dir)
+                    priority = 0 if lower_file.endswith(('.addon', '.txt')) else (1 if lower_file.endswith('.xml') else 2)
+                    files_to_process.append((priority, rel_path.lower(), file, file_path, rel_path))
 
-        print("")
-        _run_ai_code_review(addon_code_bundle, report)
-        report.write("=== END OF REPORT ===\n")
+        files_to_process.sort(key=lambda item: (item, item))
 
-    _apply_bbcode_report_styling(current_report_file)
+        for _, _, file, file_path, rel_path in files_to_process:
+            lower_file = file.lower()
+            category = "manifest" if lower_file.endswith(('.addon', '.txt')) else ("xml" if lower_file.endswith('.xml') else "lua")
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                if category == "manifest":
+                    if not re.search(r'^\s*##\s*Title\s*:', content, flags=re.MULTILINE | re.IGNORECASE):
+                        continue
+                print(f"\n  {C.BOLD}[FILE]{C.RESET} {rel_path}")
+                result = analyze_file_content(rel_path, content, current_extract_dir, addon_ctx)
+                if result.startswith("[STATUS] FAIL") or result.startswith("[STATUS] PASS"):
+                    is_fail = result.startswith("[STATUS] FAIL")
+                    status_tag = f"{C.RED}[FAIL]{C.RESET}" if is_fail else f"{C.GREEN}[PASS]{C.RESET}"
+                    if category != "lua":
+                        file_label = "XML" if category == "xml" else "Manifest"
+                        if is_fail:
+                            print(f"    ├── {status_tag} {file_label} check failed:")
+                            in_crit = False
+                            for r_line in result.splitlines():
+                                stripped_r = r_line.strip()
+                                if stripped_r == "[CRITICAL VIOLATIONS]":
+                                    in_crit = True
+                                    continue
+                                if stripped_r.startswith("[BEST PRACTICE"):
+                                    break
+                                if in_crit and stripped_r.startswith("- "):
+                                    print_wrapped_tree_item(stripped_r, color=C.RED)
+                            print(f"    └── {C.RED}See report for full details.{C.RESET}")
+                        else:
+                            print(f"    └── {status_tag} {file_label} check finished.")
+                    _parse_findings_into_report_data(rel_path, category, result, report_data)
+                else:
+                    if category == "xml":
+                        print(f"    └── {C.BLUE}[QUEUE FOR AI]{C.RESET} {C.CYAN}XSD valid, queued for semantic XML review.{C.RESET}")
+                    if not ai_preflight_triggered:
+                        ai_preflight_triggered = True
+                        _ensure_ollama_and_model_ready(MODEL_NAME)
+                    clean_lines_for_ai = [line for line in content.splitlines() if line.strip() and not line.strip().startswith("--")]
+                    addon_code_bundle.append("### START_FILE: " + rel_path + "\n\n[SOURCE_CODE]\n" + "\n".join(clean_lines_for_ai) + "\n### END_FILE: " + rel_path + "\n")
+            except Exception as e:
+                print(f"    └── {C.RED}[ERROR]{C.RESET} {str(e)}")
+                report_data["critical"][category]["File Read Error"].append((rel_path.replace("\\", "/"), None, f"-- {e}"))
+    except Exception as e:
+        print(f"  {C.RED}[ERROR] Failed to extract ZIP: {str(e)}{C.RESET}")
+        report_data["zip_violations"].append(f"Failed to extract ZIP: {e}")
+
+    print("")
+    ai_findings = _run_ai_code_review(addon_code_bundle)
+    for ai_file, ai_resp in ai_findings:
+        ai_cat = "xml" if ai_file.lower().endswith(".xml") else "lua"
+        _parse_findings_into_report_data(ai_file, ai_cat, ai_resp, report_data)
+
+    for leak_file, leaks in BATCH_LEAK_TRACKER.items():
+        if leaks:
+            report_data["best_practices"]["Possible action: Unverified Globals found (Not in API-Doc / Custom-Stubs)"].append(
+                (leak_file.replace("\\", "/"), None, ", ".join(leaks))
+            )
+    for bp_file, suggs in BATCH_BEST_PRACTICE_TRACKER.items():
+        if suggs:
+            _parse_findings_into_report_data(bp_file, "lua", "[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(f"  - {s}" for s in suggs), report_data)
+
+    _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 
     if os.path.exists(EXTRACT_FOLDER):
         shutil.rmtree(EXTRACT_FOLDER)

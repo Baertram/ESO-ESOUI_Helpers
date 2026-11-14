@@ -118,9 +118,21 @@ def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
     return "".join(out)
 
 
-def check_for_uncommented_libstub(content):
+def find_uncommented_libstub_hits(content):
+    """Returns [(line_no, raw_line), ...] for active LibStub references in Lua code."""
     code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
-    return bool(re.search(r'\blibstub\b', code_only, flags=re.IGNORECASE))
+    raw_lines = content.splitlines()
+    hits = []
+    rx = re.compile(r'\blibstub\b', flags=re.IGNORECASE)
+    for idx, line in enumerate(code_only.splitlines(), 1):
+        if rx.search(line):
+            orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
+            hits.append((idx, orig))
+    return hits
+
+
+def check_for_uncommented_libstub(content):
+    return bool(find_uncommented_libstub_hits(content))
 
 
 def strip_lua_comments_preserve_lines(content):
@@ -467,13 +479,18 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
             f"Multiple Global Addon Tables: Found {len(all_addon_globals)} global tables across the addon ({sorted_globals}). "
             "Only ONE global table per addon is allowed; attach sub-tables to your main addon table instead!"
         )
-    global_func_matches = re.findall(r'^(?!local\s)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(', comment_free_lua, flags=re.MULTILINE)
-    for g_func in global_func_matches:
+    func_def_rx = re.compile(r'^(?!local\s)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+    for idx, c_line in enumerate(clean_lines_list, 1):
+        fm = func_def_rx.match(c_line)
+        if not fm:
+            continue
+        g_func = fm.group(1)
         if g_func not in ESOUI_RAM_DICTIONARY and g_func not in ESOUI_UNDOCUMENTED_SET:
             if not re.search(r'\blocal\s+' + re.escape(g_func) + r'\b', comment_free_lua):
+                orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
                 lua_issues.append(
-                    f"Global Function Pollution: Global function '{g_func}()' leaked into _G. "
-                    "Keep it 'local' or attach it to your single addon table (e.g., MyAddon." + g_func + ")!"
+                    f"Global Function Pollution (leaked into _G) (line {idx}): "
+                    f"Keep '{g_func}()' local or attach it to your single addon table (-- {orig})"
                 )
 
     raw_table_matches = re.findall(r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{\}|\1\s*or\s*\{})', comment_free_lua, flags=re.MULTILINE)
@@ -551,10 +568,9 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     )
 
     lua_issues = []
-    if check_for_uncommented_libstub(content):
+    for ln_no, orig_line in find_uncommented_libstub_hits(content):
         lua_issues.append(
-            "Deprecated LibStub Usage: Found active 'LibStub' reference in Lua code. "
-            "LibStub is obsolete since Summerset and must not be used anymore (see https://esoui.com)."
+            f"Deprecated LibStub Usage (obsolete since Summerset) (line {ln_no}): (-- {orig_line})"
         )
     comment_free_lua = strip_lua_comments_preserve_lines(content)
     raw_lines = content.splitlines()
