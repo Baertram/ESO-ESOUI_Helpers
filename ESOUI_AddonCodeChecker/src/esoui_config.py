@@ -52,8 +52,10 @@ ALLOWED_DOWNLOAD_DOMAINS = {"esoui.com", "://esoui.com", "mmoui.com"}
 ESOUI_LATEST_MAX_ITEMS = 200
 ESOUI_BATCH_CHUNK_SIZE = 10
 
-ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX = "https://esoui.com"
-ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX = "https://esoui.com"
+_ESOUI_BASE = "https://" + "www.esoui.com"
+ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX = _ESOUI_BASE + "/downloads/info"
+ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX = _ESOUI_BASE + "/downloads/dl"
+ESOUI_UPLOAD_RULES_URL = _ESOUI_BASE + "/forums/showthread.php?t=10790"
 
 # Local Ollama model configuration
 OLLAMA_HOST = "http://localhost:11434"

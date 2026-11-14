@@ -11,7 +11,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-FILELIST_URL = "https://api.mmoui.com/v3/game/ESO/filelist.json"
+FILELIST_URL = "https://" + "api.mmoui.com/v4/game/ESO/filelist.json"
+
+
 DEFAULT_CACHE_PATH = Path("Cache") / "filelist.json"
 CACHE_TTL_SECONDS = 15 * 60  # 15 Minuten
 
@@ -121,18 +123,29 @@ def _extract_id(entry: Dict[str, Any]) -> str:
 
 
 def _extract_title(entry: Dict[str, Any]) -> str:
-    return str(entry.get("title") or entry.get("name") or "").strip()
+    return str(entry.get("title") or entry.get("UIName") or entry.get("name") or "").strip()
 
 
 def _extract_author(entry: Dict[str, Any]) -> str:
-    return str(entry.get("author") or entry.get("authorName") or "").strip()
+    return str(entry.get("author") or entry.get("UIAuthorName") or entry.get("authorName") or "").strip()
 
 
 def _extract_version(entry: Dict[str, Any]) -> str:
-    return str(entry.get("version") or "").strip()
+    return str(entry.get("version") or entry.get("UIVersion") or "").strip()
 
 
 def _extract_api_version(entry: Dict[str, Any]) -> str:
+    sub_addons = entry.get("addons")
+    if isinstance(sub_addons, list):
+        api_versions: List[str] = []
+        for sub in sub_addons:
+            if isinstance(sub, dict):
+                av = str(sub.get("apiVersion") or "").strip()
+                if av and av not in api_versions:
+                    api_versions.append(av)
+        if api_versions:
+            return ", ".join(api_versions)
+
     for key in ("apiversion", "apiVersion", "compatible", "compatibility"):
         val = entry.get(key)
         if isinstance(val, list):
@@ -143,7 +156,7 @@ def _extract_api_version(entry: Dict[str, Any]) -> str:
 
 
 def _extract_last_update(entry: Dict[str, Any]) -> int:
-    val = entry.get("lastUpdate") or entry.get("lastupdate") or 0
+    val = entry.get("lastUpdate") or entry.get("lastupdate") or entry.get("UIDate") or 0
     try:
         return int(val)
     except (TypeError, ValueError):
@@ -151,9 +164,8 @@ def _extract_last_update(entry: Dict[str, Any]) -> int:
 
 
 def _is_live_addon(entry: Dict[str, Any]) -> bool:
-    status = str(entry.get("status") or entry.get("state") or "Live").strip().lower()
+    status = str(entry.get("addonStatus") or entry.get("status") or entry.get("state") or "Live").strip().lower()
     return status == "live"
-
 
 def lookup_addon_metadata(
     addon_id: str | int,
@@ -229,10 +241,23 @@ def _compile_three_stage_patterns(query: str) -> List[Tuple[int, re.Pattern[str]
 
 
 def _entry_dependencies_text(entry: Dict[str, Any]) -> str:
-    deps = entry.get("dependencies") or entry.get("depends") or entry.get("required") or []
-    if isinstance(deps, list):
-        return " ".join(str(d) for d in deps if d is not None)
-    return str(deps or "")
+    tokens: List[str] = []
+    sub_addons = entry.get("addons")
+    if isinstance(sub_addons, list):
+        for sub in sub_addons:
+            if not isinstance(sub, dict):
+                continue
+            for key in ("requiredDependencies", "optionalDependencies"):
+                dep_list = sub.get(key)
+                if isinstance(dep_list, list):
+                    tokens.extend(str(d) for d in dep_list if d)
+    for key in ("dependencies", "depends", "required"):
+        deps = entry.get(key)
+        if isinstance(deps, list):
+            tokens.extend(str(d) for d in deps if d)
+        elif deps:
+            tokens.append(str(deps))
+    return " ".join(tokens)
 
 
 def search_addons(
@@ -316,3 +341,91 @@ def select_search_results(results: Sequence[Dict[str, Any]], selection_spec: str
     """
     indices = parse_selection_spec(selection_spec, len(results))
     return [results[i - 1] for i in indices]
+
+def _parse_numeric_addon_version(raw_val: Any) -> Optional[int]:
+    """Parst ein v4-'addOnVersion'-Feld (z. B. '43', '350', '0901') in eine Ganzzahl."""
+    if raw_val is None:
+        return None
+    clean = str(raw_val).strip().lstrip("\ufeff")
+    if not clean:
+        return None
+    if clean.isdigit():
+        return int(clean)
+    digits = re.sub(r"\D", "", clean)
+    return int(digits) if digits else None
+
+
+def lookup_dependency_addon_version(
+    dep_name: str,
+    filelist: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[int]:
+    """
+    Sucht eine Dependency in der MMOUI v4 filelist.json über sub['path'] (z. B. 'LibAddonMenu-2.0',
+    'LibFilters-3.0' oder 'MasterMerchant/Libs/LibGuildStore') und liefert deren exakte
+    numerische 'addOnVersion' zurück (oder None, falls leer/nicht gesetzt -> [AddOnVersion unknown]).
+    """
+    target = dep_name.strip().lower()
+    if not target:
+        return None
+    try:
+        items = filelist if filelist is not None else get_filelist(force=False)
+    except Exception:
+        return None
+
+    for entry in items:
+        if not _is_live_addon(entry):
+            continue
+        sub_addons = entry.get("addons")
+        if isinstance(sub_addons, list):
+            for sub in sub_addons:
+                if not isinstance(sub, dict):
+                    continue
+                sub_path = str(sub.get("path") or "").replace("\\", "/").strip().lower()
+                sub_leaf = sub_path.rsplit("/", 1)[-1] if sub_path else ""
+                if target in (sub_path, sub_leaf):
+                    return _parse_numeric_addon_version(sub.get("addOnVersion"))
+
+        if _extract_title(entry).lower() == target:
+            return _parse_numeric_addon_version(entry.get("addOnVersion"))
+    return None
+
+
+def annotate_depends_on_line(
+    raw_line: str,
+    filelist: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, bool]:
+    """
+    Annotiert alle Dependencies in einer '## DependsOn:'-Zeile anhand der v4 filelist.json:
+      -- ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
+    Gibt (annotierte_zeile, hat_veraltete_oder_fehlende_version) zurück.
+    """
+    lb, rb = chr(91), chr(93)
+    stripped = raw_line.strip()
+    if ":" not in stripped:
+        return f"-- {stripped}", False
+
+    header, rhs = stripped.split(":", 1)
+    tokens = rhs.split()
+    annotated_tokens: List[str] = []
+    has_issue = False
+
+    for token in tokens:
+        if ">=" in token:
+            dep_name, ver_part = token.split(">=", 1)
+            dep_name = dep_name.strip()
+            ver_digits = re.sub(r"\D", "", ver_part)
+            declared_ver = int(ver_digits) if ver_digits else None
+        else:
+            dep_name = token.strip()
+            declared_ver = None
+            has_issue = True
+
+        latest_ver = lookup_dependency_addon_version(dep_name, filelist=filelist)
+        if latest_ver is not None:
+            annotated_tokens.append(f"{token} {lb}current: {latest_ver}{rb}")
+            if declared_ver is not None and declared_ver < latest_ver:
+                has_issue = True
+        else:
+            annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
+
+    return f"-- {header.strip()}: {' '.join(annotated_tokens)}", has_issue

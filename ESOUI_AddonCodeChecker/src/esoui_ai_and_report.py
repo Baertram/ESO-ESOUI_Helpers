@@ -669,12 +669,12 @@ def process_addon(zip_path, zip_name):
         report.write(f'{lb}u{rb}{lb}color="DarkOrange"{rb}ESOUI ADDON UPLOAD CHECK REPORT{lb}/color{rb}{lb}/u{rb}\n')
         report.write(f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}\n")
         report.write(f"{lb}b{rb}TIMESTAMP{lb}/b{rb}:    {now.strftime('%Y-%m-%d %I:%M:%S %p')}\n\n")
-        report.write("Welcome. Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:\n")
+        report.write("Welcome and thank you for your contribution.\n" "
+        report.write("Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:\n")
         report.write(f"{lb}url{rb}https://esoui.com{lb}/url{rb}\n\n")
-        report.write("Below you'll find the report for your uploaded zip archive, per included file.\n\n")
-        report.write("Please also read the other rules and best practices, especially the AI disclosure and credits parts, and apply them where applicable.\n")
-        report.write("Thank you very much for supporting our addon quality and compatibility efforts.\n\n")
-
+        report.write("Most important: Check the AI disclosure and credits parts, and use/apply them (where applicable)!\n")
+        report.write("Thank you very much for supporting our addon quality and compatibility efforts, acting fair and with respect.\n\n")
+        
         _check_zip_structure(zip_path, report)
 
         current_extract_dir = os.path.join(EXTRACT_FOLDER, zip_clean_name)
