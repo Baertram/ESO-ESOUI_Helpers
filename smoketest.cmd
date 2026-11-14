@@ -1,1 +1,0 @@
-python smoke_test.py
