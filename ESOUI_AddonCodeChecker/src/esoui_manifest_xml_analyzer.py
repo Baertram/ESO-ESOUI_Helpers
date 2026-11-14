@@ -143,7 +143,7 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
     txt_manifests = addon_ctx["root_txt_manifests"]
     if addon_manifests and txt_manifests:
         manifest_issues.append(
-            f"Duplicate Manifest Extensions in root directory: Found both .addon ({', '.join(addon_manifests)}) and .txt ({', '.join(txt_manifests)}). Only ONE manifest extension (.addon OR .txt) is allowed!"
+            "Only 1 manifest file allowed! Use .txt for PC only, and .addon for Console addons (or which will properly work on PC's ForceConsoleFlow emulation too)"
         )
     elif ext == '.addon' and addon_manifests and not txt_manifests:
         addon_notice = (

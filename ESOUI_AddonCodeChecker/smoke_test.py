@@ -184,22 +184,30 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertIn("current: 43", res_man)
             self.assertIn("AddOnVersion unknown", res_man)
 
-            tree_bb = _build_bbcode_zip_list(
-                ["MyAddon/", "MyAddon/.git/", "MyAddon/MyAddon.addon"],
-                {"MyAddon/.git"},
-            )
-            self.assertIn(':mad: .git/', tree_bb)
-            self.assertIn('SIZE="2"', tree_bb)
-
             report_data = {
-                "zip_tree_bbcode": tree_bb,
+                "zip_all_entries": ["MyAddon/", "MyAddon/.git/", "MyAddon/MyAddon.addon", "MyAddon/Clean.lua"],
+                "zip_flagged_paths": {"MyAddon/.git"},
+                "zip_tree_bbcode": "",
                 "zip_violations": ["Hidden, OS-metadata, or development folders/files found"],
                 "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
                 "best_practices": defaultdict(list),
             }
             report_data["critical"]["manifest"]["Mandatory version check >= for non-optional dependencies missing/outdated"].append(
-                ("MyAddon/MyAddon.addon", "2", "-- ## DependsOn: LibAddonMenu-2.0>=38")
+                ("MyAddon/MyAddon.addon", "2", "## DependsOn: LibAddonMenu-2.0>=38")
             )
+
+            all_flagged = set(report_data["zip_flagged_paths"])
+            for cat_rules in report_data["critical"].values():
+                for entries in cat_rules.values():
+                    for f_path, _, _ in entries:
+                        all_flagged.add(f_path)
+            tree_bb = _build_bbcode_zip_list(report_data["zip_all_entries"], all_flagged)
+            report_data["zip_tree_bbcode"] = tree_bb
+
+            self.assertIn(':mad: .git/', tree_bb)
+            self.assertIn(':mad: MyAddon.addon', tree_bb)
+            self.assertNotIn(':mad: Clean.lua', tree_bb)
+            self.assertIn('SIZE="2"', tree_bb)
 
             with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
                 tmp_path = tf.name

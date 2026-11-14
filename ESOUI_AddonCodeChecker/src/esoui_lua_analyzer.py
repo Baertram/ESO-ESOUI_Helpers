@@ -167,8 +167,8 @@ def collect_addon_context(extract_dir):
                 elif low.endswith(".txt"):
                     try:
                         with open(full_p, "r", encoding="utf-8", errors="ignore") as mf:
-                            head_text = mf.read(1024)
-                        if re.search(r'^\s*##\s*[A-Za-z]+:', head_text, flags=re.MULTILINE):
+                            head_text = mf.read(2048)
+                        if re.search(r'^\s*##\s*(?:Title|AddOnVersion)\s*:', head_text, flags=re.MULTILINE | re.IGNORECASE):
                             root_txt_manifests.append(f)
                     except Exception:
                         pass

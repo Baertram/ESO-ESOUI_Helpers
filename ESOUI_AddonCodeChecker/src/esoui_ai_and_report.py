@@ -257,11 +257,12 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         mode_label=f"search {mode_prefix}{query_part} [{sel_input}]",
         force_download=force_download,
     )
-def _build_bbcode_zip_list(namelist, flagged_paths):
-    """Builds a nested vBulletin [SIZE="2"][list]...[/list][/SIZE] tree marking flagged items with :mad:."""
+def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
+    """Builds a nested vBulletin [SIZE="2"][list]...[/list][/SIZE] tree marking flagged items with :mad: and manifests with [MANIFEST]."""
     lb, rb = chr(91), chr(93)
     tree = {}
     flagged_norm = {p.replace("\\", "/").rstrip("/") for p in flagged_paths}
+    manifest_norm = {p.replace("\\", "/").rstrip("/") for p in (manifest_paths or set())}
 
     for entry in namelist:
         norm = entry.replace("\\", "/").strip("/")
@@ -285,6 +286,8 @@ def _build_bbcode_zip_list(namelist, flagged_paths):
         for name, child in items:
             curr_path = f"{parent_path}/{name}" if parent_path else name
             display_name = f"{name}/" if child is not None else name
+            if child is None and curr_path in manifest_norm:
+                display_name = f"{display_name} {lb}MANIFEST{rb}"
             is_bad = (curr_path in flagged_norm) or any(
                 curr_path.startswith(fp + "/") for fp in flagged_norm
             )
@@ -309,6 +312,7 @@ def _check_zip_structure(zip_path, report_data):
     dds_textures = []
     non_addon_files = []
     flagged_paths = set()
+    manifest_paths = set()
     seen_hidden_dirs = set()
 
     try:
@@ -362,8 +366,10 @@ def _check_zip_structure(zip_path, report_data):
                 elif entry_ext in ('.txt', '.addon'):
                     try:
                         text_preview = zip_ref.read(entry).decode('utf-8', errors='ignore')
-                        if not re.search(r'^\s*##\s*Title\s*:', text_preview, flags=re.MULTILINE | re.IGNORECASE):
-                            non_addon_files.append((f"{normalized} (missing '## Title:' manifest tag)", False))
+                        if re.search(r'^\s*##\s*(?:Title|AddOnVersion)\s*:', text_preview, flags=re.MULTILINE | re.IGNORECASE):
+                            manifest_paths.add(normalized)
+                        else:
+                            non_addon_files.append((f"{normalized} (missing '## Title:' / '## AddOnVersion:' manifest tag)", False))
                     except Exception:
                         non_addon_files.append((f"{normalized} (unreadable manifest)", False))
 
@@ -394,7 +400,10 @@ def _check_zip_structure(zip_path, report_data):
                 for f_item in files:
                     flagged_paths.add(f_item)
 
-            report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(all_entries, flagged_paths)
+            report_data["zip_all_entries"] = list(all_entries)
+            report_data["zip_flagged_paths"] = set(flagged_paths)
+            report_data["zip_manifest_paths"] = set(manifest_paths)
+            report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(all_entries, flagged_paths, manifest_paths)
 
             if forbidden_entries:
                 report_data["zip_violations"].append("Hidden, OS-metadata, or development folders/files found")
@@ -714,7 +723,7 @@ def process_addon(zip_path, zip_name):
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 if category == "manifest":
-                    if not re.search(r'^\s*##\s*Title\s*:', content, flags=re.MULTILINE | re.IGNORECASE):
+                    if not re.search(r'^\s*##\s*(?:Title|AddOnVersion)\s*:', content, flags=re.MULTILINE | re.IGNORECASE):
                         continue
                 print(f"\n  {C.BOLD}[FILE]{C.RESET} {rel_path}")
                 result = analyze_file_content(rel_path, content, current_extract_dir, addon_ctx)
@@ -768,6 +777,18 @@ def process_addon(zip_path, zip_name):
     for bp_file, suggs in BATCH_BEST_PRACTICE_TRACKER.items():
         if suggs:
             _parse_findings_into_report_data(bp_file, "lua", "[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(f"  - {s}" for s in suggs), report_data)
+
+    all_flagged = set(report_data.get("zip_flagged_paths", set()))
+    for cat_rules in report_data["critical"].values():
+        for entries in cat_rules.values():
+            for f_path, _, _ in entries:
+                all_flagged.add(f_path)
+    if report_data.get("zip_all_entries"):
+        report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(
+            report_data["zip_all_entries"],
+            all_flagged,
+            report_data.get("zip_manifest_paths", set()),
+        )
 
     _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 
