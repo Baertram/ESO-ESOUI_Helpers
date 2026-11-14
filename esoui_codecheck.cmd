@@ -1,1 +1,0 @@
-python esoui_codecheck.py
