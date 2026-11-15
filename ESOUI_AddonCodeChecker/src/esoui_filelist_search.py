@@ -183,6 +183,29 @@ def _is_live_addon(entry: Dict[str, Any]) -> bool:
     status = str(entry.get("addonStatus") or entry.get("status") or entry.get("state") or "Live").strip().lower()
     return status == "live"
 
+
+DISCONTINUED_OUTDATED_CATEGORY_IDS = {157}
+
+
+def is_discontinued_or_outdated(entry: Dict[str, Any]) -> bool:
+    """Returns True if the MMOUI v4 entry belongs to the 'Discontinued & Outdated' category (categoryId 65)."""
+    raw_cat_id = entry.get("categoryId")
+    if raw_cat_id is not None:
+        try:
+            if int(str(raw_cat_id).strip()) in DISCONTINUED_OUTDATED_CATEGORY_IDS:
+                return True
+        except ValueError:
+            pass
+
+    cat_vals = []
+    for key in ("category", "categoryName", "catName"):
+        val = entry.get(key)
+        if val is not None:
+            cat_vals.append(str(val).lower())
+    combined = " ".join(cat_vals)
+    return ("discontinued" in combined) or ("outdated" in combined)
+
+
 def lookup_addon_metadata(
     addon_id: str | int,
     filelist: Optional[List[Dict[str, Any]]] = None,

@@ -43,6 +43,7 @@ from src.esoui_download_io import download_zip, parse_last_selection_spec, read_
 from src.esoui_filelist_search import (
     extract_primary_api_version,
     get_last_updated_addons,
+    is_discontinued_or_outdated,
     lookup_addon_metadata,
     search_addons,
 )
@@ -263,8 +264,12 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
             if addon_id
             else f"{C.CYAN}?{C.RESET}"
         )
+        if is_discontinued_or_outdated(item):
+            formatted_title = f"{C.RED}{C.BOLD}✖ {title_text}{C.RESET}"
+        else:
+            formatted_title = f"{C.BOLD}{title_text}{C.RESET}"
         print(
-            f"  {C.WHITE}{chr(91)}{idx:>3}{chr(93)}{C.RESET} {C.BOLD}{title_text}{C.RESET} "
+            f"  {C.WHITE}{chr(91)}{idx:>3}{chr(93)}{C.RESET} {formatted_title} "
             f"(ID: {clickable_id} | v{version_text} | by {author_text} | API: {api_val})"
         )
 

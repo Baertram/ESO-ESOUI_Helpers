@@ -44,11 +44,11 @@ class TestEsouiModularSmoke(unittest.TestCase):
             parse_last_selection_spec,
         )
 
-        self.assertEqual(parse_dl_command("dl 5026"), "5026")
-        self.assertEqual(parse_dl_command("DL 123"), "123")
+        self.assertEqual(parse_dl_command("dl 5026"), ["5026"])
+        self.assertEqual(parse_dl_command("DL 123 456, 789"), ["123", "456", "789"])
         self.assertIsNone(parse_dl_command("dl abc"))
 
-        ranks, err = parse_last_selection_spec("1-3, 5, 10-11", 200)
+        ranks, err = parse_last_selection_spec("1-3, 5 10-11", 200)
         self.assertIsNone(err)
         self.assertEqual(ranks, list((1, 2, 3, 5, 10, 11)))
 
@@ -127,6 +127,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
             annotate_depends_on_line,
             extract_primary_api_version,
             get_last_updated_addons,
+            is_discontinued_or_outdated,
             lookup_addon_metadata,
             search_addons,
         )
@@ -160,6 +161,9 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertFalse(has_missing2)
         self.assertTrue(has_outdated2)
         self.assertIn("LibAddonMenu-2.0>=38 [current: 43]", line_outdated)
+
+        self.assertTrue(is_discontinued_or_outdated({"id": 3864, "title": "pChat Gamepad", "categoryId": 157}))
+        self.assertFalse(is_discontinued_or_outdated({"id": 630, "title": "FCO ItemSaver", "categoryId": 24}))
     def test_04_analyzers_leaks_and_grouped_bbcode_report(self):
         from src import esoui_filelist_search, esoui_ram_index
         from src.esoui_ai_and_report import (
