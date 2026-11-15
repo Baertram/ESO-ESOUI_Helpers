@@ -379,7 +379,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 return sample_html.encode("utf-8")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            cache_json = os.path.join(tmp_dir, "wiki_event_filters_cache.json")
+            cache_json = os.path.join(tmp_dir, "wiki_event_filters.json")
             with patch.object(esoui_lua_analyzer, "_WIKI_EVENT_FILTER_SESSION_LOADED", False), patch.object(
                 esoui_lua_analyzer, "_WIKI_DYNAMIC_EVENT_RULES", {}
             ), patch.object(esoui_lua_analyzer, "WIKI_EVENT_FILTERS_CACHE_FILE", cache_json), patch(
