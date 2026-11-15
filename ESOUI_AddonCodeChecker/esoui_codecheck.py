@@ -5,9 +5,11 @@ Local AI ESOUI Addon Code Checker (esoui_codecheck.py)
 CLI entry point and batch coordinator for static ESO addon checks and Ollama AI reviews.
 """
 
+import json
 import os
 import re
 from datetime import datetime
+
 
 from src.esoui_config import (
     BASE_FOLDER,
@@ -35,8 +37,68 @@ from src.esoui_ai_and_report import (
 )
 
 
+CMD_HISTORY_FILE = os.path.join("Cache", "cmd_history.json")
+
+
+def _load_cmd_history(history_path=CMD_HISTORY_FILE):
+    """Loads persisted repeat command history ('last_any', 'last_dl', 'last_search') from disk."""
+    default_state = {"last_any": None, "last_dl": None, "last_search": None}
+    if not os.path.isfile(history_path):
+        return default_state
+    try:
+        with open(history_path, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            for key in default_state:
+                val = loaded.get(key)
+                if isinstance(val, str) and val.strip():
+                    default_state[key] = val.strip()
+    except (OSError, json.JSONDecodeError):
+        pass
+    return default_state
+
+
+def _save_cmd_history(history_state, history_path=CMD_HISTORY_FILE):
+    """Persists repeat command history atomically to Cache/cmd_history.json."""
+    try:
+        parent = os.path.dirname(history_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = history_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(history_state, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, history_path)
+    except OSError:
+        pass
+
+
+def _resolve_repeat_command(clean_cmd, history_state):
+    """
+    Resolves 'repeat', 'repeat dl', or 'repeat search' against stored CLI command history.
+    Returns (resolved_command_or_None, error_message_or_None).
+    """
+    low = clean_cmd.strip().lower()
+    if low == "repeat":
+        last_any = history_state.get("last_any")
+        if not last_any:
+            return None, "Nothing to repeat yet (no previous check command executed)."
+        return last_any, None
+    if low == "repeat dl":
+        last_dl = history_state.get("last_dl")
+        if not last_dl:
+            return None, "No previous 'dl' command to repeat."
+        return last_dl, None
+    if low == "repeat search":
+        last_search = history_state.get("last_search")
+        if not last_search:
+            return None, "No previous 'search' command to repeat."
+        return last_search, None
+    return None, f"Invalid 'repeat' syntax '{clean_cmd}'. Supported: 'repeat', 'repeat dl', 'repeat search'."
+
+
 def main_cli():
     """Runs the interactive CLI loop for ZIPs, URLs, TXT batch lists, 'dl', 'last', or 'search'."""
+
     print("==================================================================")
     print("               LOCAL AI ESOUI ADDON CHECKER READY                 ")
     if DEBUG_MODE:
@@ -47,13 +109,17 @@ def main_cli():
     print(f"  - {C.WHITE}Direct ID{C.RESET}       : [force] dl <addonId>  (e.g. dl 5026, force dl 5026)")
     print(f"  - {C.WHITE}Latest Addons{C.RESET}   : [force] last <1..{ESOUI_LATEST_MAX_ITEMS}> (e.g. last 2-5, force last 1, 3, 7)")
     print(f"  - {C.WHITE}Search Addons{C.RESET}   : [force] search <q1, q2> | search dep <d1, d2> | search author <a1, a2> | search api <v1, !v2>")
+    print(f"  - {C.WHITE}Repeat Last{C.RESET}     : [force] repeat | repeat dl | repeat search")
     print(f"  - {C.WHITE}Cleanup{C.RESET}         : clear cache | clear zips [YYMMDD] | clear reports [YYMMDD]")
     print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop a .zip archive or a .txt batch list\n")
     os.makedirs(BASE_FOLDER, exist_ok=True)
 
+    cmd_history = _load_cmd_history()
+
+
     while True:
         raw = read_cli_input_with_esc(
-            f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'clear ...', .zip/.txt, or ESC/'exit'): "
+            f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'repeat ...', 'clear ...', .zip/.txt, or ESC/'exit'): "
         ).strip()
         if raw == "__ESC__" or raw.lower() == "exit":
             print("Exiting. Have a great day!")
@@ -63,6 +129,7 @@ def main_cli():
 
         clean = raw.strip('"').strip("'").strip()
 
+        # 'clear' is never stored in repeat history
         if re.match(r'^clear(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
             handle_clear_command(clean[5:].strip())
             continue
@@ -75,37 +142,69 @@ def main_cli():
                 print(f"{C.RED}-> Error: Missing target after 'force' (e.g. 'force dl 5026' or 'force last 1-5').{C.RESET}")
                 continue
 
+        # Resolve 'repeat', 'repeat dl', or 'repeat search'
+        if re.match(r'^repeat(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
+            repeated_cmd, rep_err = _resolve_repeat_command(clean, cmd_history)
+            if rep_err:
+                print(f"{C.RED}-> Error: {rep_err}{C.RESET}")
+                continue
+            clean = repeated_cmd
+            if re.match(r'^force(?:\s+|$)', clean, flags=re.IGNORECASE):
+                force_flag = True
+                clean = clean[5:].strip().strip('"').strip("'").strip()
+            display_rep = f"force {clean}" if force_flag else clean
+            print(f"{C.CYAN}-> Repeating command:{C.RESET} {C.WHITE}{display_rep}{C.RESET}")
+
+        executed_full_cmd = f"force {clean}" if force_flag else clean
+
         if re.match(r'^last(?:\s+.*)?$', clean, flags=re.IGNORECASE):
             spec_part = clean[4:].strip()
             selected_ranks, err_msg = parse_last_selection_spec(spec_part, ESOUI_LATEST_MAX_ITEMS)
             if err_msg:
                 print(f"{C.RED}-> Error: {err_msg}{C.RESET}")
             else:
+                cmd_history["last_any"] = executed_full_cmd
+                _save_cmd_history(cmd_history)
                 process_latest_filelist_in_chunks(selected_ranks, spec_part, force_download=force_flag)
             continue
 
         if re.match(r'^search(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
+            cmd_history["last_search"] = executed_full_cmd
+            cmd_history["last_any"] = executed_full_cmd
+            _save_cmd_history(cmd_history)
             handle_search_command(clean[6:].strip(), force_download=force_flag)
             continue
+
         if re.match(r'^dl(?:\s*.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
-            addon_id = parse_dl_command(clean)
-            if not addon_id:
-                print(f"{C.RED}-> Error: Invalid 'dl' syntax '{clean}'. Expected numeric addon ID, e.g. 'dl 5026'.{C.RESET}")
+            addon_ids = parse_dl_command(clean)
+            if not addon_ids:
+                print(f"{C.RED}-> Error: Invalid 'dl' syntax '{clean}'. Expected numeric addon ID(s), e.g. 'dl 5026' or 'dl 630, 3586'.{C.RESET}")
             else:
-                print_addon_metadata(addon_id, force_refresh=force_flag)
-                dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
-                print(f"{C.CYAN}-> Resolved 'dl {addon_id}' to direct download URL:{C.RESET} {C.WHITE}{dl_url}{C.RESET}")
-                zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=force_flag)
-                if zip_path and zip_name:
-                    process_addon(zip_path, zip_name)
+                cmd_history["last_dl"] = executed_full_cmd
+                cmd_history["last_any"] = executed_full_cmd
+                _save_cmd_history(cmd_history)
+                for idx_dl, addon_id in enumerate(addon_ids, 1):
+                    if len(addon_ids) > 1:
+                        print(f"\n{C.CYAN}[DL {idx_dl}/{len(addon_ids)}]{C.RESET}")
+                    print_addon_metadata(addon_id, force_refresh=force_flag)
+                    dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
+                    print(f"{C.CYAN}-> Resolved 'dl {addon_id}' to direct download URL:{C.RESET} {C.WHITE}{dl_url}{C.RESET}")
+                    zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=force_flag)
+                    if zip_path and zip_name:
+                        process_addon(zip_path, zip_name)
             continue
 
         if os.path.exists(clean) and clean.lower().endswith(".txt"):
+            cmd_history["last_any"] = executed_full_cmd
+            _save_cmd_history(cmd_history)
             _run_txt_batch_file(clean)
         else:
             zip_path, zip_name = handle_input(clean, force_download=force_flag)
             if zip_path and zip_name:
+                cmd_history["last_any"] = executed_full_cmd
+                _save_cmd_history(cmd_history)
                 process_addon(zip_path, zip_name)
+    
 
 
 def _run_txt_batch_file(txt_path):
@@ -147,19 +246,20 @@ def _run_txt_batch_file(txt_path):
             continue
 
         if re.match(r'^dl(?:\s*.*)?$', item_clean, flags=re.IGNORECASE) and not os.path.exists(item_clean):
-            addon_id = parse_dl_command(item_clean)
-            if not addon_id:
-                print(f"{C.RED}[CRITICAL ERROR] Batch stopped at item {idx}: Invalid 'dl' syntax '{item}' (expected e.g. 'dl 5026').{C.RESET}")
+            addon_ids = parse_dl_command(item_clean)
+            if not addon_ids:
+                print(f"{C.RED}[CRITICAL ERROR] Batch stopped at item {idx}: Invalid 'dl' syntax '{item}' (expected e.g. 'dl 5026' or 'dl 630, 3586').{C.RESET}")
                 break
-            print_addon_metadata(addon_id, force_refresh=item_force)
-            dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
-            print(f"{C.CYAN}-> Resolved 'dl {addon_id}' to direct download URL:{C.RESET} {C.WHITE}{dl_url}{C.RESET}")
-            zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=item_force)
-            if not zip_path or not zip_name:
-                print(f"{C.YELLOW}[SKIP] Batch item {idx}: Addon ID {addon_id} not found or no ZIP returned. Continuing with next item...{C.RESET}")
-                skipped_count += 1
-                continue
-            process_addon(zip_path, zip_name)
+            for addon_id in addon_ids:
+                print_addon_metadata(addon_id, force_refresh=item_force)
+                dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
+                print(f"{C.CYAN}-> Resolved 'dl {addon_id}' to direct download URL:{C.RESET} {C.WHITE}{dl_url}{C.RESET}")
+                zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=item_force)
+                if not zip_path or not zip_name:
+                    print(f"{C.YELLOW}[SKIP] Batch item {idx}: Addon ID {addon_id} not found or no ZIP returned. Continuing with next item...{C.RESET}")
+                    skipped_count += 1
+                    continue
+                process_addon(zip_path, zip_name)
             continue
 
         if item_clean.lower().startswith(("http://", "https://")):

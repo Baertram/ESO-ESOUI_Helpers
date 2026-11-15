@@ -350,6 +350,53 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
             )
 
 
+def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
+    """Detects global variable assignments (missing 'local') anywhere in a Lua file."""
+    if not is_index_built():
+        build_esoui_index_once()
+
+    code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
+    lines = code_only.splitlines()
+    file_locals = _collect_lua_local_identifiers(code_only)
+
+    # Collect inline table literal keys ({ key = val }) so they are never misflagged as globals
+    flattened = re.sub(r'\s+', ' ', code_only)
+    table_keys = set()
+    for block in re.findall(r'\{([^{}]+)\}', flattened):
+        table_keys.update(re.findall(r'(?<!\[)\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=(?!=)', block))
+
+    allowed_globals = (
+        set(addon_ctx.get("all_global_tables", set()))
+        | set(addon_ctx.get("saved_variables", set()))
+        | set(ESOUI_RAM_DICTIONARY.keys())
+        | ESOUI_UNDOCUMENTED_SET
+        | LUA_STD_LIBS
+    )
+    lua_keywords = {
+        "local", "function", "if", "end", "then", "return", "else", "elseif",
+        "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
+        "not", "while", "repeat", "until", "break", "do", "self", "_"
+    }
+
+    assign_rx = re.compile(r'(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)')
+    for idx, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("local "):
+            continue
+        for m in assign_rx.finditer(line):
+            var_name = m.group(1)
+            if var_name in lua_keywords or var_name in file_locals or var_name in table_keys or var_name in allowed_globals:
+                continue
+            prefix = line[:m.start(1)].rstrip()
+            # Skip table field assignments (obj.field = ...), indexed targets, or 'for var = 1, 10'
+            if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
+                continue
+            orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
+            lua_issues.append(
+                f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
+            )
+
+
 def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx=None):
     """Detects unconditional chat output inside EVENT_ADD_ON_LOADED / EVENT_PLAYER_ACTIVATED handlers."""
     code_no_strings = strip_lua_strings_preserve_lines(comment_free_lua)
@@ -577,9 +624,11 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     clean_lines_list = comment_free_lua.splitlines()
 
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
+    _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues)
     lua_suggestions = _check_lua_global_tables_and_locals(
         comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues
     )
+
     _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx)
     ai_slop_block = _check_lua_ai_slop_patterns(content, raw_lines)
 

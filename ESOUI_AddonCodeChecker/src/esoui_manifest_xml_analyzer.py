@@ -54,7 +54,7 @@ def _check_manifest_folder_match(file_name, manifest_issues):
             )
 
 
-def _check_manifest_dependencies(line_num, line_str, manifest_issues):
+def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions):
     for tag in ["DependsOn", "PCDependsOn", "ConsoleDependsOn"]:
         if line_str.startswith("## " + tag + ":") or line_str.startswith("## " + tag + " "):
             if ":" in line_str:
@@ -64,11 +64,16 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues):
                     manifest_issues.append(
                         f"Invalid delimiter in {tag} (line {line_num}): Use spaces instead of commas or semicolons (-- {line_str})."
                     )
-                annotated_line, has_ver_issue = annotate_depends_on_line(line_str)
-                if has_ver_issue:
+                annotated_line, has_missing, has_outdated = annotate_depends_on_line(line_str)
+                if has_missing:
                     manifest_issues.append(
-                        f"Mandatory version check >= for non-optional dependencies missing/outdated (line {line_num}): ({annotated_line})"
+                        f"Mandatory version check >= missing for non-optional dependency (line {line_num}): ({annotated_line})"
                     )
+                if has_outdated:
+                    manifest_suggestions.append(
+                        f"Mandatory version check >= outdated - consider an update (line {line_num}): ({annotated_line})"
+                    )
+
 
     if line_str.startswith("## OptionalDependsOn:") or line_str.startswith("## OptionalDependsOn "):
         if ":" in line_str:
@@ -123,7 +128,7 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
                     f"Outdated APIVersion (missing current live API {current_api}) (line {line_num}): (-- {line_str})"
                 )
 
-        _check_manifest_dependencies(line_num, line_str, manifest_issues)
+        _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions)
 
     if detected_api_line is not None:
         print(f"    ├── Detected ## APIVersion: {detected_api_line} {C.CYAN}(Current Live API: {current_api or 'Unknown'}){C.RESET}")

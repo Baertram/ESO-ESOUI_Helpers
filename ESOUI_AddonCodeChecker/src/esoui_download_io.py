@@ -239,7 +239,8 @@ def handle_input(user_input, force_download=False):
         f"   - Direct addon ID command: 'dl <addonId>' (e.g. 'dl 5026')\n"
         f"   - Latest Live Addons (1..{ESOUI_LATEST_MAX_ITEMS}): 'last <spec>' (e.g. 'last 5', 'last 2-5', 'last 1, 3, 7, 10-20')\n"
         f"   - Search Addons / Deps / Author / API: 'search <q1, q2>', 'search dep <d1, d2>', 'search author <a1, a2>', or 'search api <v1, !v2>'\n"
-        f"   - Optional 'force ' prefix to bypass filelist/ZIP cache (e.g. 'force dl 5026', 'force last 1-3', 'force search Lib')\n"
+        f"   - Repeat previous check command: 'repeat', 'repeat dl', or 'repeat search'\n"
+        f"   - Optional 'force ' prefix to bypass filelist/ZIP cache (e.g. 'force dl 5026', 'force last 1-3', 'force search Lib', 'force repeat')\n"
         f"   - Local .zip archive or .txt batch list file{C.RESET}"
     )
     return None, None
@@ -283,11 +284,12 @@ def parse_last_selection_spec(spec_str, max_items):
     if not raw_spec:
         return None, f"Missing selection. Examples: '5', '2-5', '1, 3, 7, 10-20' (range 1..{max_items})."
 
+    if raw_spec.startswith(",") or raw_spec.endswith(",") or ",," in raw_spec:
+        return None, f"Empty entry in '{raw_spec}'. Remove trailing or double commas."
+
     selected = []
     seen = set()
-    for tok in [t.strip() for t in raw_spec.split(",")]:
-        if not tok:
-            return None, f"Empty entry in '{raw_spec}'. Remove trailing or double commas."
+    for tok in [t.strip() for t in re.split(r"[,\s]+", raw_spec) if t.strip()]:
         range_match = re.match(r'^(\d+)\s*-\s*(\d+)$', tok)
         single_match = re.match(r'^(\d+)$', tok)
         if range_match:
@@ -313,9 +315,18 @@ def parse_last_selection_spec(spec_str, max_items):
 
 
 def parse_dl_command(text_input):
-    """Matches 'dl <addonId>' and returns the numeric addonId or None."""
-    m = re.match(r'^dl\s*(\d+)$', (text_input or "").strip(), flags=re.IGNORECASE)
-    return m.group(1) if m else None
+    """
+    Matches 'dl <spec>' (e.g. 'dl 5026', 'dl 630, 3586', 'dl 630 3586', 'dl 630-632')
+    and returns a list of numeric addon ID strings (or None if invalid).
+    """
+    m = re.match(r'^dl(?:\s+|(?=\d))(.+)$', (text_input or "").strip(), flags=re.IGNORECASE)
+    if not m:
+        return None
+    spec_part = m.group(1).strip()
+    id_ints, err = parse_last_selection_spec(spec_part, 999999999)
+    if err or not id_ints:
+        return None
+    return [str(i) for i in id_ints]
 
 
 def handle_clear_command(arg_str):

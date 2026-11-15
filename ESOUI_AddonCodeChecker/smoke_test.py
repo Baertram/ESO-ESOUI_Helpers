@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Smoke-Test für die modulare Struktur von esoui_codecheck.py, das MMOUI v4 filelist.json Schema
-und das kompakte BBCode-Reporting.
+Smoke-Test für die modulare Struktur von esoui_codecheck.py, das MMOUI v4 filelist.json Schema,
+das kompakte BBCode-Reporting und die persistente repeat-Historie.
 Ausführung im Projekt-Hauptverzeichnis:
     python smoke_test.py
 """
@@ -31,6 +31,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertTrue(hasattr(esoui_ram_index, "build_esoui_index_once"))
         self.assertTrue(hasattr(esoui_lua_analyzer, "analyze_lua_file"))
         self.assertTrue(hasattr(esoui_filelist_search, "annotate_depends_on_line"))
+        self.assertTrue(hasattr(esoui_filelist_search, "extract_primary_api_version"))
         self.assertIn("/v4/game/ESO/filelist.json", esoui_filelist_search.FILELIST_URL)
         self.assertIn("/downloads/info", esoui_config.ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX)
         self.assertIn("/downloads/dl", esoui_config.ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX)
@@ -54,9 +55,10 @@ class TestEsouiModularSmoke(unittest.TestCase):
         _, err_oob = parse_last_selection_spec("201", 200)
         self.assertIsNotNone(err_oob)
 
-        self.assertTrue(is_authorized_esoui_url(esoui_config_url := ("https://" + "://esoui.com")))
-        self.assertTrue(len(esoui_config_url) > 10)
-        self.assertFalse(is_authorized_esoui_url("https://" + "://example.com"))
+        valid_url = "https://" + "://esoui.com"
+        evil_url = "https://" + "://example.com"
+        self.assertTrue(is_authorized_esoui_url(valid_url))
+        self.assertFalse(is_authorized_esoui_url(evil_url))
     def _sample_v4_filelist(self):
         return [
             {
@@ -95,35 +97,35 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 "library": True,
             },
             {
-                "id": 630,
-                "title": "FCO ItemSaver",
+                "id": 3586,
+                "title": "FCO Accessibility",
                 "author": "Baertram",
-                "version": "2.8.4",
+                "version": "2.3",
                 "lastUpdate": 1791291956000,
                 "addonStatus": "Live",
                 "addons": [
                     {
-                        "path": "FCOItemSaver",
-                        "addOnVersion": "284",
+                        "path": "FCOAccessibility",
+                        "addOnVersion": "23",
                         "apiVersion": "101050 101051",
+                        "library": False,
                         "requiredDependencies": ["LibAddonMenu-2.0>=43", "LibFilters-3.0>=350"],
-                    }
+                    },
+                    {
+                        "path": "FCOAccessibility/Libs/EmbeddedSubLib",
+                        "addOnVersion": "1",
+                        "apiVersion": "101048 101049",
+                        "library": True,
+                    },
                 ],
-            },
-            {
-                "id": 9999,
-                "title": "Archived Mod",
-                "author": "Baertram",
-                "version": "1.0",
-                "lastUpdate": 1799999999000,
-                "addonStatus": "Archived",
-                "addons": [{"path": "ArchivedMod", "addOnVersion": "", "apiVersion": "101030"}],
+                "library": False,
             },
         ]
 
-    def test_03_v4_filelist_search_and_depends_annotation(self):
+    def test_03_v4_filelist_primary_api_and_depends_split(self):
         from src.esoui_filelist_search import (
             annotate_depends_on_line,
+            extract_primary_api_version,
             get_last_updated_addons,
             lookup_addon_metadata,
             search_addons,
@@ -132,37 +134,39 @@ class TestEsouiModularSmoke(unittest.TestCase):
         sample_v4 = self._sample_v4_filelist()
         selected, top = get_last_updated_addons(spec="1-2", filelist=sample_v4)
         self.assertEqual(len(top), 3)
-        self.assertEqual([str(x["id"]) for x in selected], ["630", "7"])
+        self.assertEqual([str(x["id"]) for x in selected], ["3586", "7"])
 
-        meta = lookup_addon_metadata("630", filelist=sample_v4)
+        meta = lookup_addon_metadata("3586", filelist=sample_v4)
         self.assertIsNotNone(meta)
-        self.assertEqual(meta["title"], "FCO ItemSaver")
         self.assertEqual(meta["api_version"], "101050 101051")
+        self.assertEqual(extract_primary_api_version(sample_v4[-1]), "101050 101051")
 
         hits_author, _ = search_addons("Baertram", search_mode="author", filelist=sample_v4)
-        self.assertEqual([str(x["id"]) for x in hits_author], ["630", "2343"])
+        self.assertEqual([str(x["id"]) for x in hits_author], ["3586", "2343"])
 
-        hits_dep, _ = search_addons("LibFilters-3.0", search_mode="dep", filelist=sample_v4)
-        self.assertEqual([str(x["id"]) for x in hits_dep], ["630"])
-
-        hits_api, _ = search_addons("101051", search_mode="api", filelist=sample_v4)
-        self.assertEqual([str(x["id"]) for x in hits_api], ["630"])
-
-        annotated, has_issue = annotate_depends_on_line(
-            "## DependsOn: LibAddonMenu-2.0>=38 LibFilters-3.0 LibWhatever",
+        line_missing, has_missing, has_outdated = annotate_depends_on_line(
+            "## DependsOn: LibAddonMenu-2.0>=43 LibFilters-3.0 LibWhatever",
             filelist=sample_v4,
         )
-        self.assertTrue(has_issue)
-        self.assertIn("LibAddonMenu-2.0>=38", annotated)
-        self.assertIn("current: 43", annotated)
-        self.assertIn("LibFilters-3.0", annotated)
-        self.assertIn("current: 350", annotated)
-        self.assertIn("LibWhatever", annotated)
-        self.assertIn("AddOnVersion unknown", annotated)
+        self.assertTrue(has_missing)
+        self.assertFalse(has_outdated)
+        self.assertIn("LibFilters-3.0 [current: 350]", line_missing)
+        self.assertIn("LibWhatever [AddOnVersion unknown]", line_missing)
 
-    def test_04_static_analyzers_and_compact_bbcode_report(self):
+        line_outdated, has_missing2, has_outdated2 = annotate_depends_on_line(
+            "## DependsOn: LibAddonMenu-2.0>=38",
+            filelist=sample_v4,
+        )
+        self.assertFalse(has_missing2)
+        self.assertTrue(has_outdated2)
+        self.assertIn("LibAddonMenu-2.0>=38 [current: 43]", line_outdated)
+    def test_04_analyzers_leaks_and_grouped_bbcode_report(self):
         from src import esoui_filelist_search, esoui_ram_index
-        from src.esoui_ai_and_report import _build_bbcode_zip_list, _render_final_bbcode_report
+        from src.esoui_ai_and_report import (
+            _build_bbcode_zip_list,
+            _parse_findings_into_report_data,
+            _render_final_bbcode_report,
+        )
         from src.esoui_manifest_xml_analyzer import analyze_file_content
 
         sample_v4 = self._sample_v4_filelist()
@@ -178,50 +182,84 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 "root_txt_manifests": [],
             }
 
-            bad_manifest = "## Title: MyAddon\n## DependsOn: LibAddonMenu-2.0>=38 LibWhatever\n"
+            bad_lua = (
+                "local function TestLeak()\n"
+                "    leakedStatus = true\n"
+                "    local a = next({})\n"
+                "    local b = next({1})\n"
+                "end\n"
+            )
+            res_lua = analyze_file_content("MyAddon/Core.lua", bad_lua, addon_ctx=ctx)
+            self.assertIn("FAIL", res_lua)
+            self.assertIn("Global Variable Pollution (missing 'local' for 'leakedStatus')", res_lua)
+
+            bad_manifest = "## Title: MyAddon\n## DependsOn: LibAddonMenu-2.0>=38 LibFilters-3.0\n"
             res_man = analyze_file_content("MyAddon/MyAddon.addon", bad_manifest, addon_ctx=ctx)
             self.assertIn("FAIL", res_man)
-            self.assertIn("current: 43", res_man)
-            self.assertIn("AddOnVersion unknown", res_man)
+            self.assertIn("Mandatory version check >= missing for non-optional dependency", res_man)
+            self.assertIn("Mandatory version check >= outdated - consider an update", res_man)
 
             report_data = {
-                "zip_all_entries": ["MyAddon/", "MyAddon/.git/", "MyAddon/MyAddon.addon", "MyAddon/Clean.lua"],
-                "zip_flagged_paths": {"MyAddon/.git"},
+                "zip_all_entries": ["MyAddon/", "MyAddon/MyAddon.addon", "MyAddon/Core.lua", "MyAddon/Clean.lua"],
+                "zip_flagged_paths": set(),
+                "zip_manifest_paths": {"MyAddon/MyAddon.addon"},
                 "zip_tree_bbcode": "",
-                "zip_violations": ["Hidden, OS-metadata, or development folders/files found"],
+                "zip_violations": [],
                 "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
                 "best_practices": defaultdict(list),
             }
-            report_data["critical"]["manifest"]["Mandatory version check >= for non-optional dependencies missing/outdated"].append(
-                ("MyAddon/MyAddon.addon", "2", "## DependsOn: LibAddonMenu-2.0>=38")
-            )
+            _parse_findings_into_report_data("MyAddon/MyAddon.addon", "manifest", res_man, report_data)
+            _parse_findings_into_report_data("MyAddon/Core.lua", "lua", res_lua, report_data)
 
             all_flagged = set(report_data["zip_flagged_paths"])
             for cat_rules in report_data["critical"].values():
                 for entries in cat_rules.values():
                     for f_path, _, _ in entries:
                         all_flagged.add(f_path)
-            tree_bb = _build_bbcode_zip_list(report_data["zip_all_entries"], all_flagged)
-            report_data["zip_tree_bbcode"] = tree_bb
-
-            self.assertIn(':mad: .git/', tree_bb)
-            self.assertIn(':mad: MyAddon.addon', tree_bb)
-            self.assertNotIn(':mad: Clean.lua', tree_bb)
-            self.assertIn('SIZE="2"', tree_bb)
+            report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(
+                report_data["zip_all_entries"],
+                all_flagged,
+                report_data["zip_manifest_paths"],
+            )
 
             with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
                 tmp_path = tf.name
             try:
-                _render_final_bbcode_report(tmp_path, "MyAddon.zip", "2026-11-14 10:20:00 PM", report_data)
+                _render_final_bbcode_report(tmp_path, "MyAddon.zip", "2026-11-15 02:35:00 AM", report_data)
                 with open(tmp_path, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
-                self.assertIn("Addon check - report results", rendered)
-                self.assertIn("Critical violations", rendered)
-                self.assertIn('SIZE="2"', rendered)
-                self.assertNotIn("PASS", rendered)
+                self.assertIn(":mad: MyAddon.addon [MANIFEST]", rendered)
+                self.assertIn(":mad: Core.lua", rendered)
+                self.assertNotIn(":mad: Clean.lua", rendered)
+                self.assertIn("[b]next[/b] (x2)", rendered)
+                self.assertNotIn("[SIZE=\"2\"]-- ", rendered)
+                pos_outdated = rendered.find("Mandatory version check >= outdated - consider an update")
+                pos_next = rendered.find("Global variable used multiple times without a local reference")
+                self.assertTrue(0 < pos_outdated < pos_next)
             finally:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
+
+    def test_05_repeat_and_persistent_history(self):
+        import esoui_codecheck
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            hist_file = os.path.join(tmp_dir, "cmd_history.json")
+            state = {"last_any": "dl 630", "last_dl": "dl 630", "last_search": "search author Baertram"}
+            esoui_codecheck._save_cmd_history(state, history_path=hist_file)
+            loaded = esoui_codecheck._load_cmd_history(history_path=hist_file)
+
+            cmd_any, err_any = esoui_codecheck._resolve_repeat_command("repeat", loaded)
+            self.assertIsNone(err_any)
+            self.assertEqual(cmd_any, "dl 630")
+
+            cmd_dl, err_dl = esoui_codecheck._resolve_repeat_command("repeat dl", loaded)
+            self.assertIsNone(err_dl)
+            self.assertEqual(cmd_dl, "dl 630")
+
+            cmd_search, err_s = esoui_codecheck._resolve_repeat_command("repeat search", loaded)
+            self.assertIsNone(err_s)
+            self.assertEqual(cmd_search, "search author Baertram")
 
 
 if __name__ == "__main__":

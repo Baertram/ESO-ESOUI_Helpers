@@ -134,17 +134,29 @@ def _extract_version(entry: Dict[str, Any]) -> str:
     return str(entry.get("version") or entry.get("UIVersion") or "").strip()
 
 
-def _extract_api_version(entry: Dict[str, Any]) -> str:
+def extract_primary_api_version(entry: Dict[str, Any]) -> str:
+    """
+    Liefert ausschließlich die APIVersion des Haupt-Addons aus entry['addons']
+    (ignoriert eingebettete Sub-Addons / mitgelieferte Libraries in Unterordnern).
+    """
     sub_addons = entry.get("addons")
-    if isinstance(sub_addons, list):
-        api_versions: List[str] = []
-        for sub in sub_addons:
-            if isinstance(sub, dict):
-                av = str(sub.get("apiVersion") or "").strip()
-                if av and av not in api_versions:
-                    api_versions.append(av)
-        if api_versions:
-            return ", ".join(api_versions)
+    if isinstance(sub_addons, list) and sub_addons:
+        valid_subs = [s for s in sub_addons if isinstance(s, dict) and str(s.get("apiVersion") or "").strip()]
+        if valid_subs:
+            pkg_title_clean = re.sub(r"[^a-z0-9]", "", _extract_title(entry).lower())
+            pkg_is_lib = bool(entry.get("library"))
+
+            def _score(sub: Dict[str, Any]) -> Tuple[int, int, int]:
+                raw_path = str(sub.get("path") or "").replace("\\", "/").strip("/")
+                is_root_folder = 0 if "/" not in raw_path else 1
+                sub_is_lib = bool(sub.get("library"))
+                lib_mismatch = 0 if (pkg_is_lib or not sub_is_lib) else 1
+                path_clean = re.sub(r"[^a-z0-9]", "", raw_path.lower())
+                title_match = 0 if (pkg_title_clean and (path_clean in pkg_title_clean or pkg_title_clean in path_clean)) else 1
+                return (is_root_folder, lib_mismatch, title_match)
+
+            best_sub = min(valid_subs, key=_score)
+            return str(best_sub.get("apiVersion") or "").strip()
 
     for key in ("apiversion", "apiVersion", "compatible", "compatibility"):
         val = entry.get(key)
@@ -153,6 +165,10 @@ def _extract_api_version(entry: Dict[str, Any]) -> str:
         if val is not None and str(val).strip():
             return str(val).strip()
     return ""
+
+
+def _extract_api_version(entry: Dict[str, Any]) -> str:
+    return extract_primary_api_version(entry)
 
 
 def _extract_last_update(entry: Dict[str, Any]) -> int:
@@ -393,21 +409,22 @@ def lookup_dependency_addon_version(
 def annotate_depends_on_line(
     raw_line: str,
     filelist: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[str, bool]:
+) -> Tuple[str, bool, bool]:
     """
     Annotiert alle Dependencies in einer '## DependsOn:'-Zeile anhand der v4 filelist.json:
-      -- ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
-    Gibt (annotierte_zeile, hat_veraltete_oder_fehlende_version) zurück.
+      ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
+    Gibt (annotierte_zeile, has_missing_required_ver, has_outdated_ver) zurück.
     """
     lb, rb = chr(91), chr(93)
     stripped = raw_line.strip()
     if ":" not in stripped:
-        return stripped, False
+        return stripped, False, False
 
     header, rhs = stripped.split(":", 1)
     tokens = rhs.split()
     annotated_tokens: List[str] = []
-    has_issue = False
+    has_missing = False
+    has_outdated = False
 
     for token in tokens:
         if ">=" in token:
@@ -415,17 +432,21 @@ def annotate_depends_on_line(
             dep_name = dep_name.strip()
             ver_digits = re.sub(r"\D", "", ver_part)
             declared_ver = int(ver_digits) if ver_digits else None
+            has_ge = True
         else:
             dep_name = token.strip()
             declared_ver = None
-            has_issue = True
+            has_ge = False
 
         latest_ver = lookup_dependency_addon_version(dep_name, filelist=filelist)
         if latest_ver is not None:
             annotated_tokens.append(f"{token} {lb}current: {latest_ver}{rb}")
-            if declared_ver is not None and declared_ver < latest_ver:
-                has_issue = True
+            if not has_ge:
+                has_missing = True
+            elif declared_ver is not None and declared_ver < latest_ver:
+                has_outdated = True
         else:
             annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
 
-    return f"{header.strip()}: {' '.join(annotated_tokens)}", has_issue
+    return f"{header.strip()}: {' '.join(annotated_tokens)}", has_missing, has_outdated
+

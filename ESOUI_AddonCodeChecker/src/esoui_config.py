@@ -110,3 +110,10 @@ def make_clickable_file_link(file_path, color=C.WHITE, display_text=None):
     file_uri = "file:///" + abs_path.replace("\\", "/")
     label = display_text if display_text is not None else abs_path
     return f"\033]8;;{file_uri}\033\\{color}\033[4m{label}{C.RESET}\033]8;;\033\\"
+
+
+def make_clickable_url_link(url, color=C.CYAN, display_text=None):
+    """Formats an HTTP/HTTPS URL as a clickable OSC 8 terminal hyperlink."""
+    label = display_text if display_text is not None else url
+    return f"\033]8;;{url}\033\\{color}\033[4m{label}{C.RESET}\033]8;;\033\\"
+

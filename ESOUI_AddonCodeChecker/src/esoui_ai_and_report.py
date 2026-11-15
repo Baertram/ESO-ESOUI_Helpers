@@ -23,6 +23,7 @@ from src.esoui_config import (
     C,
     DEBUG_MODE,
     ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
+    ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX,
     ESOUI_BATCH_CHUNK_SIZE,
     ESOUI_LATEST_MAX_ITEMS,
     ESOUI_UPLOAD_RULES_URL,
@@ -34,21 +35,25 @@ from src.esoui_config import (
     REPORTS_BASE_DIR,
     ZIP_FOLDER,
     make_clickable_file_link,
+    make_clickable_url_link,
     print_wrapped_tree_item,
 )
+
 from src.esoui_download_io import download_zip, parse_last_selection_spec, read_cli_input_with_esc
 from src.esoui_filelist_search import (
+    extract_primary_api_version,
     get_last_updated_addons,
     lookup_addon_metadata,
     search_addons,
 )
+
 from src.esoui_lua_analyzer import (
     BATCH_BEST_PRACTICE_TRACKER,
     BATCH_LEAK_TRACKER,
     collect_addon_context,
 )
 from src.esoui_manifest_xml_analyzer import analyze_file_content
-from src.esoui_ram_index import build_esoui_index_once, is_index_built
+from src.esoui_ram_index import build_esoui_index_once, get_current_api_version, is_index_built
 
 try:
     from esoui_rules_bestpractice import CUSTOM_RULES
@@ -59,15 +64,48 @@ client = Client(host=OLLAMA_HOST)
 OLLAMA_PREFLIGHT_CACHE = None
 
 
+def _format_colored_api_version(api_str, current_api=None, base_color=""):
+    """
+    Colors each numeric API token relative to current_api:
+      - older (< current_api): RED
+      - current (== current_api): GREEN
+      - newer/future (> current_api): WHITE
+    """
+    raw = str(api_str or "").strip()
+    if not raw or raw == "?":
+        return f"{C.WHITE}?{base_color}"
+
+    cur_int = int(current_api) if (current_api and str(current_api).isdigit()) else None
+    if cur_int is None:
+        return f"{C.WHITE}{raw}{base_color}"
+
+    def _color_token(match):
+        tok = match.group(0)
+        val = int(tok)
+        if val < cur_int:
+            col = C.RED
+        elif val == cur_int:
+            col = C.GREEN
+        else:
+            col = C.WHITE
+        return f"{col}{tok}{C.RESET}{base_color}"
+
+    return re.sub(r"\b\d{6}\b", _color_token, raw)
+
+
 def print_addon_metadata(addon_id, force_refresh=False):
     """Displays title, author, version, and API version from filelist.json for a given addon_id."""
     try:
         meta = lookup_addon_metadata(addon_id, force=force_refresh)
         if meta:
+            cur_api = get_current_api_version()
+            colored_api = _format_colored_api_version(meta.get("api_version") or "?", current_api=cur_api, base_color=C.CYAN)
+            aid = str(meta["addon_id"])
+            clickable_id = make_clickable_url_link(f"{ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX}{aid}", color=C.WHITE, display_text=aid)
             print(
-                f"{C.CYAN}-> Addon Info {chr(91)}{C.WHITE}{meta['addon_id']}{C.CYAN}{chr(93)}: "
+                f"{C.CYAN}-> Addon Info {chr(91)}{clickable_id}{C.CYAN}{chr(93)}: "
                 f"{C.WHITE}{meta['title']}{C.CYAN} | v{C.WHITE}{meta['version'] or '?'}{C.CYAN} | "
-                f"by {C.WHITE}{meta['author'] or '?'}{C.CYAN} | API: {C.WHITE}{meta['api_version'] or '?'}{C.RESET}"
+                f"by {C.WHITE}{meta['author'] or '?'}{C.CYAN} | API: {colored_api}{C.RESET}"
             )
     except Exception as e:
         if DEBUG_MODE:
@@ -75,20 +113,8 @@ def print_addon_metadata(addon_id, force_refresh=False):
 
 
 def _extract_entry_api_display(item):
-    sub_addons = item.get("addons")
-    if isinstance(sub_addons, list):
-        apis = []
-        for sub in sub_addons:
-            if isinstance(sub, dict):
-                av = str(sub.get("apiVersion") or "").strip()
-                if av and av not in apis:
-                    apis.append(av)
-        if apis:
-            return ", ".join(apis)
-    api_val = item.get("apiversion") or item.get("apiVersion") or item.get("compatible") or "?"
-    if isinstance(api_val, list):
-        return ", ".join(str(x) for x in api_val)
-    return str(api_val)
+    return extract_primary_api_version(item) or "?"
+
 def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force_download=False):
     """Downloads and checks selected filelist entries [(rank_idx, entry_dict), ...] in chunks."""
     if chunk_size is None:
@@ -221,18 +247,25 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         print(f"{C.YELLOW}-> No matching 'Live' addons found for '{query_part}'.{C.RESET}\n")
         return
 
+    cur_api = get_current_api_version()
+    cur_api_hint = f" (Current Live API: {C.GREEN}{cur_api}{C.GREEN})" if cur_api else ""
     stage_note = f" (matched at '+' fallback stage {stage_used})" if "+" in query_part else ""
-    print(f"{C.GREEN}-> Found {C.WHITE}{len(hits)}{C.GREEN} matching addon(s){stage_note}:{C.RESET}")
+    print(f"{C.GREEN}-> Found {C.WHITE}{len(hits)}{C.GREEN} matching addon(s){stage_note}{cur_api_hint}:{C.RESET}")
 
     for idx, item in enumerate(hits, 1):
         addon_id = str(item.get("id") or item.get("UID") or item.get("addon_id") or "").strip()
         title_text = str(item.get("title") or item.get("UIName") or "Unknown").strip()
         author_text = str(item.get("author") or item.get("UIAuthorName") or "?").strip()
         version_text = str(item.get("version") or item.get("UIVersion") or "?").strip()
-        api_val = _extract_entry_api_display(item)
+        api_val = _format_colored_api_version(_extract_entry_api_display(item), current_api=cur_api)
+        clickable_id = (
+            make_clickable_url_link(f"{ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX}{addon_id}", color=C.CYAN, display_text=addon_id)
+            if addon_id
+            else f"{C.CYAN}?{C.RESET}"
+        )
         print(
             f"  {C.WHITE}{chr(91)}{idx:>3}{chr(93)}{C.RESET} {C.BOLD}{title_text}{C.RESET} "
-            f"(ID: {C.CYAN}{addon_id}{C.RESET} | v{version_text} | by {author_text} | API: {api_val})"
+            f"(ID: {clickable_id} | v{version_text} | by {author_text} | API: {api_val})"
         )
 
     sel_input = auto_select_spec if auto_select_spec is not None else read_cli_input_with_esc(
@@ -558,7 +591,7 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
             item_text = s[2:].strip()
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
-            code_match = re.search(r'\((--[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
+            code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
             raw_code = code_match.group(1).strip() if code_match else ""
             code_comment = re.sub(r'^--\s*', '', raw_code)
             rule_title = re.sub(r'\s*\((?:at\s+)?line\s+\d+\)|\s+at\s+line\s+\d+', '', item_text, flags=re.IGNORECASE)
@@ -577,6 +610,13 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                     bp_rule = "Possible action: Startup Chat Spam Detected (unconditional message on load/player activated)"
                 elif "Manifest .addon found" in bp_header:
                     bp_rule = "Possible action: Console UI Manifest Notice (.addon used instead of .txt)"
+                elif "Mandatory version check >= outdated - consider an update" in bp_header:
+                    bp_rule = "Possible action: Mandatory version check >= outdated - consider an update"
+                    ln_m = re.search(r'\bline\s+(\d+)\b', bp_header, flags=re.IGNORECASE)
+                    c_m = re.search(r'\((##[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', bp_header)
+                    report_data["best_practices"][bp_rule].append(
+                        (rel_norm, ln_m.group(1) if ln_m else None, c_m.group(1).strip() if c_m else "")
+                    )
                 else:
                     bp_rule = "Possible action: " + next(iter(bp_header.split(":", 1))).strip()
                 report_data["_last_bp_rule"] = bp_rule
@@ -587,11 +627,11 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 num_m = re.match(r'^(\d+):\s+--\s*(.*)$', s)
                 if hit_m:
                     var_n, ln_no, c_txt = hit_m.group(1), hit_m.group(2), hit_m.group(3).strip()
-                    report_data["best_practices"][report_data["_last_bp_rule"]].append((f"{rel_norm}:{ln_no} ({var_n})", None, c_txt))
+                    grouped_vars = report_data.setdefault("bp_grouped_globals", defaultdict(lambda: defaultdict(list)))
+                    grouped_vars[var_n][rel_norm].append((ln_no, c_txt))
                 elif num_m:
                     ln_no, c_txt = num_m.group(1), num_m.group(2).strip()
                     report_data["best_practices"][report_data["_last_bp_rule"]].append((rel_norm, ln_no, c_txt))
-
 
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
     """Writes the compact, grouped ESOUI BBCode report without any PASS noise."""
@@ -613,7 +653,7 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
         out.append(report_data["zip_tree_bbcode"])
 
     has_crit = bool(report_data["zip_violations"]) or any(bool(v) for v in report_data["critical"].values())
-    has_bp = bool(report_data["best_practices"])
+    has_bp = bool(report_data["best_practices"]) or bool(report_data.get("bp_grouped_globals"))
 
     if has_crit:
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="Red"{rb}{lb}FONT="Impact"{rb}Critical violations{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
@@ -643,7 +683,42 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
     if has_bp:
         out.append("")
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrange"{rb}{lb}FONT="Impact"{rb}Best practices{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+
+        outdated_dep_rule = "Possible action: Mandatory version check >= outdated - consider an update"
+        outdated_entries = report_data["best_practices"].get(outdated_dep_rule)
+        if outdated_entries:
+            out.append("")
+            out.append(f"{lb}u{rb}{outdated_dep_rule}{lb}/u{rb}")
+            out.append(f"{lb}list{rb}")
+            for f_path, ln_no, code_txt in outdated_entries:
+                loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+            out.append(f"{lb}/list{rb}")
+
+        grouped_globals = report_data.get("bp_grouped_globals")
+        if grouped_globals:
+            out.append("")
+            out.append(f"{lb}u{rb}Possible action: Global variable used multiple times without a local reference{lb}/u{rb}")
+            out.append(f"{lb}list{rb}")
+            for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
+                files_map = grouped_globals[var_name]
+                total_hits = sum(len(hits) for hits in files_map.values())
+                spoiler_lines = []
+                for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
+                    spoiler_lines.append(f"{lb}b{rb}{f_path}{lb}/b{rb}")
+                    for ln_no, code_txt in files_map[f_path]:
+                        spoiler_lines.append(f"{ln_no}: {code_txt}")
+                spoiler_body = "\n".join(spoiler_lines)
+                out.append(
+                    f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
+                    f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                )
+            out.append(f"{lb}/list{rb}")
+
         for bp_rule, entries in report_data["best_practices"].items():
+            if bp_rule == outdated_dep_rule:
+                continue
             out.append("")
             out.append(f"{lb}u{rb}{bp_rule}{lb}/u{rb}")
             out.append(f"{lb}list{rb}")
