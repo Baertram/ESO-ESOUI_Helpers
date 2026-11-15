@@ -60,14 +60,19 @@ from src.esoui_lua_analyzer import (
     BATCH_BEST_PRACTICE_TRACKER,
     BATCH_LEAK_TRACKER,
     collect_addon_context,
+    get_wiki_lgb_fetch_error,
 )
+
 from src.esoui_manifest_xml_analyzer import analyze_file_content
 from src.esoui_ram_index import build_esoui_index_once, get_current_api_version, is_index_built
 
 try:
-    from esoui_rules_bestpractice import CUSTOM_RULES
+    from add_input.esoui_rules_bestpractice import CUSTOM_RULES
 except ImportError:
-    CUSTOM_RULES = ""
+    try:
+        from esoui_rules_bestpractice import CUSTOM_RULES
+    except ImportError:
+        CUSTOM_RULES = ""
 
 client = Client(host=OLLAMA_HOST)
 OLLAMA_PREFLIGHT_CACHE = None
@@ -940,6 +945,9 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
             if has_cat_lgb:
                 out.append(f"{lb}u{rb}LibGroupBroadcast Protocoll/Event conflict{lb}/u{rb}")
+                lgb_err = get_wiki_lgb_fetch_error()
+                if lgb_err:
+                    out.append(f'{lb}color="Red"{rb}{lgb_err}{lb}/color{rb}')
                 out.append(f"{lb}list{rb}")
                 sorted_lgb = sorted(
                     lgb_entries,

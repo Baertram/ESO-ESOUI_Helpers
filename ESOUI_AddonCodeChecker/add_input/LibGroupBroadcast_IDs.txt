@@ -1,0 +1,958 @@
+__TOC__
+
+= LibGroupBroadcast IDs =
+[[How_to_share_data_within_groups|LibGroupBroadcast]] is a library used by addons to share data between group members.<br>
+Find the API description and usage here: [https://www.esoui.com/downloads/info1337-LibGroupBroadcastformerlyLibGroupSocket.html LibGroupBroadcast at esoui.com]<br><br>
+
+The sent data is associated to your addon by an ID (data protocol), which has to be unique across all addons to prevent compatibility issues.<br>
+
+== Howto register your own custom event / data protocol ==
+After you wrote your code and before you upload your addon or library to ESOUI, you have to add the necessary information to the tables below.
+Simply pick the next free id, update your code accordingly and edit this wiki page.
+
+== Handlers ==
+{| class="wikitable" 
+|-
+! addon
+! author
+! handler name
+! has public api
+! short description
+! custom events
+! protocols
+|-
+| LibGroupSocket
+| [https://www.esoui.com/downloads/author-5815.html sirinsidiator]
+| -
+| no
+| Provides backwards compatibility for addons built on LibGroupSocket
+| -
+| LibGroupSocket
+|-
+| [https://www.esoui.com/downloads/info3297-LibDataSharedeprecated.html LibDataShare (DEPRECATED)]
+| [https://www.esoui.com/downloads/author-67051.html m00nyONE]
+| LibDataShare
+| no
+| Provides backwards compatibility for addons built on LibDataShare ('''Deprecated: Compatibility layer of LibDataShare within LibGroupBroadcast was disabled with Update46!''')
+| -
+| LibDataShare
+|-
+| LibGroupUIReload
+| [https://www.esoui.com/downloads/author-5815.html sirinsidiator]
+| UIReload
+| yes
+| Notifies other group members when a UI reload has completed
+| UIReload
+|-
+| LibGroupResources
+| [https://www.esoui.com/downloads/author-5815.html sirinsidiator]
+| GroupResources
+| yes
+| Shares stamina and magicka values with the group
+| -
+| Stamina, Magicka
+|-
+| [https://www.esoui.com/downloads/info3338-LibSetDetection.html LibSetDetection] 
+| [https://www.esoui.com/downloads/author-55222.html ExoY]
+| LibSetDetection
+| yes
+| Shares equipped set pieces with group members.
+| -
+| SetData
+|-
+| [https://www.esoui.com/downloads/info4024-LibGroupCombatStats.html LibGroupCombatStats]
+| [https://www.esoui.com/downloads/author-67051.html m00nyONE]
+| LibGroupCombatStats
+| yes
+| Shares combat statistics like DPS, HPS, ULT ( type & value ) with group members.
+| -
+| UltType, UltValue, DPS, HPS, SkillLines
+|-
+| [https://www.esoui.com/downloads/info4024-LibGroupCombatStats.html LibGroupPotionCooldowns]
+| [https://www.esoui.com/downloads/author-67051.html m00nyONE]
+| LibGroupPotionCooldowns
+| yes
+| Shares potion cooldowns with group members.
+| -
+| Cooldown
+|-
+| [https://www.esoui.com/downloads/info2311-HodorReflexes-DPSUltimateShare.html HodorReflexes]
+| [https://www.esoui.com/downloads/author-67051.html m00nyONE]
+| HodorReflexes
+| no
+| Well known Raid addon that displays all sorts of combat statistics for raidleads and groupmembers. Also provides some convenient group features like leader election, pull countdowns and instance reset requests.
+| ExitInstanceRequest
+| HRCtrl, PullCountdown, HideMe
+|-
+| [https://www.esoui.com/downloads/info3257-FastReset.html FastReset]
+| [https://www.esoui.com/downloads/author-67051.html m00nyONE]
+| FastReset
+| no
+| Addon for Trifecta progression groups that helps to automatically exit an instance if someone dies and ports everyone back in to start again.
+| -
+| FastReset
+|-
+| [https://www.esoui.com/downloads/info3977-LibFBCommon.html LibFBCommon]
+| [https://www.esoui.com/downloads/author-67134.html FlatBadger]
+| LibFBCommon
+| no
+| Shares data for several addons authored by FlatBadger
+| -
+| LibFBCommon
+|-
+| LibInfiniteArchive
+| [https://www.esoui.com/downloads/author-67134.html FlatBadger]
+| LibInfiniteArchive
+| no
+| Fires events inside the Infinite Archive
+| -
+| LibInfiniteArchive
+|-
+| TargetMarks
+| [https://www.esoui.com/downloads/author-79827.html mattia-02] [https://www.esoui.com/downloads/author-25520.html bibik92]
+| TargetMarks
+| no
+| Addon for auto assigns and syncs target markers in ESO, ensuring stability and accuracy by automatically removing invalid markers and preventing desynchronization across group members. (Under development / Alpha test)
+| -
+| TargetMarks
+|-
+| CombatAlerts
+| [https://www.esoui.com/downloads/author-24346.html code65536]
+| CombatAlerts
+| no
+| For coordinating combat events with other group members.
+| -
+| TBD
+|-
+| ExtendedJournal
+| [https://www.esoui.com/downloads/author-24346.html code65536]
+| ExtendedJournal
+| no
+| TBD
+| -
+| TBD
+|-
+| [https://www.esoui.com/downloads/info3012-ArtaeumGroupTool2.0.html ArtaeumGroupTool]
+| [https://www.esoui.com/downloads/author-56423.html M0R_Gaming]
+| ArtaeumGroupTool
+| no
+| Provides various tools useful for group coordination in Cyrodiil, such as assist pings, Daedric Artifact Power sharing, and Camp Lock data.
+| -
+| ArtaeumPing, ArtaeumDataSync
+|-
+| [https://www.esoui.com/downloads/info3824-BetterDungeonFinder.html BetterDungeonFinder]
+| [https://www.esoui.com/downloads/author-79181.html MelanAster]
+| BetterDungeonFinder
+| no
+| A more visually appealing and efficient dungeon finder
+| -
+| BetterDungeonFinder
+|-
+| [https://www.esoui.com/downloads/info3944-MakossContentHelper.html Makos's ContentHelper]
+| [https://www.esoui.com/downloads/author-80364.html makos000]
+| ContentHelperHandler
+| no
+| Sends data for live Coordinates, Raid Warnings and Countdowns
+| -
+| ContentHelperProtocol
+|-
+| LibShareCombatEvents
+| [https://www.esoui.com/downloads/author-78813.html barny]
+| LibShareCombatEvents
+| no
+| Sends Combat Event data to groupmembers to track "hidden" buffs in PVP
+| -
+| TBD
+|-
+| [https://www.esoui.com/downloads/info2475-RdKGroupTool.html RdK Group Tool]
+| [https://www.esoui.com/downloads/author-32609.html Sordrak]
+| RdKGroupToolHandler
+| no
+| Shares information in PvP
+| -
+| TBD
+|-
+| [https://www.esoui.com/downloads/info3137-CrutchAlerts.html CrutchAlerts]
+| [https://www.esoui.com/downloads/author-42939.html Kyzeragon]
+| CrutchAlerts
+| no
+| For sharing information in PvE content
+| -
+| TBD
+|-
+| [https://www.esoui.com/downloads/fileinfo.php?id=4263#info%20-Call-I-Do.html Call I Do]
+| [https://www.esoui.com/downloads/author-80438.html Lebiez]
+| CallIDo
+| no
+| Add-on for groups without voice chat to allow for organization and timing in PvP
+| -
+| LibGroupSocket
+|-
+| More Markers
+| [https://www.esoui.com/downloads/author-56423.html M0R_Gaming]
+| M0RMarkers
+| no
+| Shares 3D Marker Profiles with members of the group.
+| -
+| M0RMarkersData, M0RMarkersHeader
+|-
+| [https://www.esoui.com/downloads/fileinfo.php?id=3776#info DsR GuildRoster]
+| [https://www.esoui.com/downloads/author-58662.html Hasenwarrior]
+| DsRGuildHall
+| no
+| Shares information in Group (PvP and PvE)
+| -
+| DsRGroupAttackCountdown
+|-
+| [https://www.esoui.com/downloads/info4449-CombatCoordinates-3DGroundEffectsampGroupSynce.g.StandardofMight.html CombatCoordinates]
+| [https://www.esoui.com/downloads/author-84168.html Duesentrieb]
+| CombatCoordinates
+| no
+| Shares 3D world coordinates and tracking information for combat ground effects (e.g. Standards, Heals, Buffs) with group members.
+| -
+| CombatCoordinates
+|-
+| Activity Board Reminder
+| [https://www.esoui.com/downloads/author-14136.html Cloudor]
+| ABR
+| no
+| Syncs activity announcements to group members
+| -
+| ABRBook
+|-
+| NextTry RaidCommander
+| [https://www.esoui.com/downloads/author-83013.html R0ctan]
+| NextTryRaidSignals
+| no
+| Syncs raid lead signals to group members
+| -
+| NTRS_Protocol
+|-
+| Event Notifier
+| [https://www.esoui.com/downloads/author-83013.html R0ctan]
+| EventNotifierSignals
+| no
+| Syncs events to group members
+| -
+| ENS_Protocol
+|-
+| Hawkinator
+| [https://www.esoui.com/downloads/author-83013.html R0ctan]
+| HawkinatorSignals
+| no
+| Syncs Tank Events with RaidCommander
+| -
+| HWK_Protocol
+|-
+| [https://www.esoui.com/downloads/info4611-FarmingPartyPlus.html FarmingPartyPlus]
+| [https://www.esoui.com/downloads/author-86542.html DeviousCode]
+| FarmingPartyPlus
+| yes
+| Built-in fishing and gutting sync for FarmingPartyPlus, including processed fish subtraction, Fish / Perfect Roe results, and stack replay recovery after reset or late join.
+| -
+| FarmingPartyPlusSyncLoot
+|-
+| EZOCore
+| [[User:Zuriplayer|Zuriplayer]]
+| EZOCore
+| yes
+| EZO family addon presence and compact group activity state sharing.
+| EZO_CORE_GROUP_REQUEST_V1
+| EZO_CORE_GROUP_V1
+|-
+| Inspect Vestige
+| LuckyRome13
+| InspectVestige
+| no
+| Shares your loadout (gear, skill bars, champion points, attributes, stats, mundus, food, potion, class/subclass) and cosmetics with group members so they can inspect your build
+| -
+| InspectVestigeLoadout, InspectVestigeCosmetics
+|-
+| BattleSense
+| noobkiss
+| WBattleSense
+| no
+| Shares Combat data to groupmembers to track
+| -
+| WBattleSense
+|-
+| [https://www.esoui.com/downloads//info4353-MeridiasBlockPooky.html Meridias BlockPooky]
+| [https://www.esoui.com/downloads/author-82294.html Claudi (Awnova)]
+| BlockPooky
+| no
+| provides critical combat awareness for PvP scenarios
+| -
+| BlockPookyWarnings
+|-
+| Arcanum Artis GuildHall
+| Niwasaka
+| ArcanumGuildHall 
+| no
+| Shares information in Group (PvE)
+| -
+| ArcanumArtisCallouts
+|-
+| ResParse
+| thepandalore
+| ResParse
+| no
+| Broadcasts completed player resurrection casts for distributed resurrection scoring and tracking. 
+| [deprecated/released]
+| ResParseScoresheet
+|-
+| [https://www.esoui.com/downloads/info3648-SuperStar-SeasonalUpdate.html SuperStar]
+| [https://www.esoui.com/downloads/author-71234.html Lykeion]
+| SuperStar
+| no
+| Provides concise build info sharing among group members
+| -
+| SuperStarBuildSummary
+|-
+| PB's Tamriel de Tetris
+| [https://www.esoui.com/forums/member.php?u=87187 PinkBanther]
+| PBsTetris
+| no
+| Falling-block puzzle with group versus matches
+| -
+| PBsTetrisVersus
+|-
+| PB's Tamriel de Janken
+| [https://www.esoui.com/forums/member.php?u=87187 PinkBanther]
+| PBsJanken
+| no
+| Rock-paper-scissors with a group member
+| -
+| PBsJanken
+|-
+| PB's Translate
+| [https://www.esoui.com/forums/member.php?u=87187 PinkBanther]
+| PBsTranslate	
+| no
+| Offline English-to-Japanese chat translation; optional dictionary sharing
+| -
+| PBsTranslateDictionary
+|-
+| PinkB's War Table
+| [https://www.esoui.com/forums/member.php?u=87187 PinkBanther]
+| PBsWarTable
+| no
+| Board game with COM levels and group duels
+| -
+| PBsWarTable
+|-
+| PinkB's EmoteSynchronizer
+| [https://www.esoui.com/forums/member.php?u=87187 PinkBanther]
+| PBsEmoteSynchronizer
+| no
+| Plays the group leader’s emotes on every member’s character. The leader sends the emote id; members replay it.
+| -
+| PBsEmoteSyncV1
+|-
+| Rytic Combat & Raid Tools
+| [https://www.esoui.com/forums/member.php?userid=87353 Rytic]
+| RyticRaidSync
+| no
+| Synchronizes raid team assignments and group data between Rytic Combat & Raid Tools users.
+| -
+| RyticRaidSync
+|-
+| Radiant Range
+| [https://www.esoui.com/forums/member.php?u=87289 WifeyRytic]
+| RadiantRangeSharing
+| no
+| Synchronizes Radiant Range settings and visible range state between group members using Radiant Range.
+| -
+| RadiantRangeGroupState
+|-
+| [https://www.esoui.com/downloads/info4116-PermanentMementoPCampConsole.html Permanent Memento]
+| [https://www.esoui.com/forums/member.php?u=69240 APHONlC]
+| PermMementoSync
+| no
+| Plays the same memento for group members who use Permanent Memento, and stops it for everyone.
+| -
+| PermMementoSync
+|}
+
+== Custom Events ==
+There are only 40 ids available, so please use them sparingly.
+For simplicities sake, just pick the next available id. If you find yourself in need of several ids, consider writing a protocol instead.
+{| class="wikitable" 
+|-
+! event id
+! event name
+! short description
+! addon
+|-
+| 0
+| UIReload
+| Fires after a UI reload
+| LibGroupUIReload
+|-
+| 1
+| GroupChatTypingIndicator (reserved for future development)
+| Fires if anyone in the group chat starts to type
+| GroupChatTypingIndicator (name may change, or transferred to a library)
+|-
+| 2
+| ExitInstanceRequest
+| Fires if the group leader requests members to exit the current instance
+| HodorReflexes
+|-
+| 3
+| EZO_CORE_GROUP_REQUEST_V1
+| Requests an EZO group presence/state resync from compatible group members.
+| EZOCore
+|-
+| 4
+| 
+| 
+| 
+|-
+| 5
+| -
+| -
+| -
+|-
+| 6
+| -
+| -
+| -
+|-
+| 7
+| -
+| -
+| -
+|-
+| 8
+| -
+| -
+| -
+|-
+| 9
+| -
+| -
+| -
+|-
+| 10
+| -
+| -
+| -
+|-
+| 39
+| reserved
+| use this id for local testing if you haven't picked one yet
+| -
+|-
+|}
+(Add more rows as needed)
+
+== Protocols ==
+For protocols the id range is a bit larger and there are up to 512 ids available.
+In order to keep ids somewhat organized, it was suggested that for now everyone should "reserve" blocks of 10 ids, so future protocols that belong to the same handler can be added later if needed. The first 10 ids are reserved for LibGroupBroadcast itself and for legacy support of specific libraries that shared data via map pings.
+
+{| class="wikitable" 
+|- style="font-weight:bold; font-family:Tahoma, Geneva, sans-serif !important;"
+! protocol id
+! protocol name
+! short description
+! addon
+|-
+| 0
+| LibGroupSocket
+| Emulates the old protocol that operated on map pings
+| LibGroupSocket
+|-
+| 1
+| LibDataShare
+| '''DEPRECATED:''' Emulates the old LibDataShare Protocol that operated on map pings
+| LibDataShare
+|-
+| colspan="4" | ''2 - 9 reserved for LibGroupBroadcast and legacy protocols''
+|-
+| 10
+| Stamina
+| Sends stamina values to group members
+| LibGroupResources
+|-
+| 11
+| Magicka
+| Sends magicka values to group members
+| LibGroupResources
+|-
+| colspan="4" | ''12 - 19 reserved for LibGroupResources''
+|-
+| 20
+| UltType
+| Sends currently equipped ultimates and ult activated sets together with their individual activation cost.
+| LibGroupCombatStats
+|-
+| 21
+| UltValue
+| Sends the current ult points of the player to the group.
+| LibGroupCombatStats
+|-
+| 22
+| Dps
+| Sends the current dps & overall damage to group members.
+| LibGroupCombatStats
+|-
+| 23
+| Hps
+| Sends the current hps & overheal to group members.
+| LibGroupCombatStats
+|-
+| 24
+| SkillLines
+| Sends the currently eqipped skillLines for Subclassing to group members.
+| LibGroupCombatStats
+|-
+| colspan="4" | ''25 reserved for LibGroupCombatStats''
+|-
+| 26
+| Cooldown
+| Sends the potion cooldown of a player.
+| LibGroupPotionCooldowns
+|-
+| colspan="4" | ''27 - 29 reserved for LibGroupPotionCooldowns''
+|-
+| 30
+| HRCtrl
+| Sends HodorReflexes Control Packets - ( this might get replaced in the future by a dedicated Library )
+| HodorReflexes
+|-
+| 31
+| PullCountdown
+| Sends pull countdowns to group members
+| HodorReflexes
+|-
+| 32
+| Hide Me
+| sends your hiding preferences to other players that control on which lists with what ultimates you appear on other clients 
+| HodorReflexes
+|-
+| colspan="4" | ''33 - 34 reserved for HodorReflexes''
+|-
+| 35
+| FastReset
+| maxDeathCount, deathCount, inNewTrial, exitInstance
+| FastReset
+|-
+| colspan="4" | ''36 - 39 reserved for FastReset''
+|-
+| 40
+| SetData
+| Shares equipped set pieces with group members.(Compatibility with LibVersion 4) 
+| LibSetDetection
+|-
+| 41
+| SetDataV2 
+| Shares equipped set pieces with group members.(NewProtocol for LibVersion 5) 
+| LibSetDetection
+|-
+| colspan="4" | ''42 - 49 reserved for LibSetDetection and other addons/projects by ExoY''
+|-
+| 50
+| LibFBCommon
+| Generic protocol to handle sending data to different addons using a single id
+| LibFBCommon
+|-
+| 51
+| LIABuffSelected
+| Sends data about the verse or vision selected
+| LibInfiniteArchive
+|-
+| 52
+| LIAMarauderSpawned
+| Sends data when a Marauder spawns
+| LibInfiniteArchive
+|-
+| 53
+| LIAMysteryVerseUsed
+| Sends data about a mystery verse when used by a player
+| LibInfiniteArchive
+|-
+| 54
+| LIATomeshellDestroyed
+| Sends information on Tomeshells destroyed and remaining in the Filer's Wing
+| LibInfiniteArchive
+|-
+| 55
+| LIAItemDetected
+| Sends data when a specific item is detected (currently only quest markers)
+| LibInifiniteArchive
+|-
+| 56
+| LIAUnknownPortalStateChanged
+| Sends data relating to the state of an unknown portal
+| LibInfiniteArchive
+|-
+| 57
+| LIASweetrollConsumed
+| Sends data when a sweetroll has been consumed in Haefal's Butchery
+| LibInfiniteArchive
+|-
+| colspan="4" | ''58-59 reserved for LibInfiniteArchive''
+|-
+| 60
+| TargetMarks
+| Sends and Syncs compressed Targets list
+| TargetMarks
+|-
+| colspan="4" | ''61-69 reserved for TargetMarks''
+|-
+| colspan="4" | ''70-79 reserved for CombatAlerts''
+|-
+| colspan="4" | ''80-89 reserved for ExtendedJournal''
+|-
+| 90
+| ArtaeumPing
+| Sends a request for an assist ping to other players in the group, notifying where the sender is.
+| ArtaeumGroupTool
+|-
+| 91
+| ArtaeumDataSync
+| Syncs data such as daedric artifact power and camp lock between players in the group. Also contains a flag for requesting a sync.
+| ArtaeumGroupTool
+|-
+| colspan="4" | ''92-99 reserved for ArtaeumGroupTool''
+|-
+| 100
+| BetterDungeonFinder
+| Broadcast the coordinates of possible locations of chests in dungeons
+| BetterDungeonFinder
+|-
+|-
+| 101
+| ContentHelperProtocol
+| Sends data for live Coordinates, Raid Warnings and Countdowns
+| Makos's ContentHelper
+|-
+| colspan="4" | ''102-111 reserved for RdKGroupTool''
+|-
+| colspan="4" | ''112-121 reserved for LibShareCombatEvents''
+|-
+| 122
+| M0RMarkersData
+| Sends Marker Data via a long string to other players.
+| More Markers
+|-
+| 123
+| M0RMarkersHeader
+| Sends String Information to the receiver to notify them when a string is done being sent.
+| More Markers
+|-
+| colspan="4" | ''124-131 reserved for More Markers''
+|-
+| colspan="4" | ''132 reserved for LibTarget''
+|-
+| colspan="4" | ''133-136 reserved for CombatHelper''
+|-
+| 140 - 149
+| Achievement_Share_Data
+| Shares achievement data for dungeons, trials, etc. between group members. 
+| Achievement Share
+|-
+| 150
+| RPCodexState
+| Live combat-state sync (HP, conditions, turn) for in-game tabletop RP encounters
+| RP Codex
+|-
+| 151
+| RPCodexTurn
+| Turn / initiative-owner sync for tabletop RP encounters
+| RP Codex
+|-
+| 152
+| RPCodexClientSignal
+| Client-to-DM signals (ack, resync-request) for tabletop RP encounters
+| RP Codex
+|-
+| colspan="4" | ''153 - 159 reserved for RP Codex''
+|-
+| 160
+| WarArchitectSync
+| Synchronizes War Architect assignments, Ultimate selections, countdowns, cancellations, and resets.
+| War Architect
+|-
+| colspan="4" | ''161 - 169 reserved for War Architect''
+|-
+| 170
+| ArcanumArtisCallouts 
+| Sends callouts and countdowns to group members.
+| Arcanum Artis GuildHall
+|-
+| 171
+| ArcanumArtisGroups 
+| Sends group assignment to group members.
+| Arcanum Artis GuildHall
+|-
+| colspan="4" | ''172 - 179 reserved for Arcanum Artis GuildHall''
+|-
+| colspan="4" | ''180 - 189 reserved for Rytic Combat & Raid Tools''
+|-
+| 180
+| RyticRaidSync
+| Synchronizes raid team assignments and group data between Rytic Combat & Raid Tools users.
+| Rytic Combat & Raid Tools
+|-
+| 181
+| RyticRaidTeamNames
+| Shares raid team names between Rytic Combat & Raid Tools users.
+| Rytic Combat & Raid Tools
+|-
+| 182
+| RyticRaidWarning
+| Shares raid warning messages between Rytic Combat & Raid Tools users.
+| Rytic Combat & Raid Tools
+|-
+| 183
+| RCRTLCMirrorAssignmentsV1
+| Shares Lucent Citadel mirror assignments between Rytic Combat & Raid Tools and Wifey DPS Positions.
+| Rytic Combat & Raid Tools
+|-
+| colspan="4" | ''190-199 reserved for Radiant Range''
+|-
+| 190
+| RadiantRangeGroupState
+| Shares Radiant Range settings and visible range state between group members.
+| Radiant Range
+|-
+| 191
+| RadiantRangeConeHeading
+| Shares facing/heading data for group members using Radiant Range's Cone display.
+| Radiant Range
+|-
+| colspan="4" | ''200 reserved for FOX Metrica''
+|-
+| 201
+| FOXM_GroupSignal
+| Shares current network ping and privacy mode with group members powers FOX Metrica’s live group table.
+| FOX Metrica
+|-
+| 202
+| FOXM_GroupSignalDiag
+| Diagnostic presence/transport readiness and sharing OFF flags for group members.
+| FOX Metrica
+|-
+|-
+| 203
+| FOXM_GroupSignalRez
+| Resurrection protocol: share local resurrection phase. This is used to notify group members of resurrection status changes.
+| FOX Metrica
+|-
+| colspan="4" | ''204-209 reserved for FOX Metrica''
+|-
+| colspan="4" | ''210-219 reserved for CrutchAlerts''
+|-
+| colspan="4" | ''220-229 reserved for Beltalowda''
+|-
+| 230
+| DsRGroupAttackCountdown
+| Send Countdown for GroupAttack Countdown
+| DsR GuildRoster
+|-
+| 231
+| TauntTracker
+| Send Caster of taunt on target
+| TenshiRaito
+|-
+|-
+| colspan="4" | ''232-239 reserved for TauntTracker add-on.''
+|-
+| 240
+| ABRBook
+| Syncs activity announcement content to group members
+| Activity Board Reminder
+|-
+| colspan="4" | ''241-249 reserved for ABR''
+|-
+| 250
+| KrakenMarkersPack
+| Shares a Kraken Markers profile (3D world markers) with the group
+| Kraken Markers
+|-
+| 251
+| BlockPookyWarnings
+| Shares pull warning context (type, ability id/name, source, target) with group members.
+| Meridias BlockPooky
+|-
+| 300
+| TheProfitHello
+| Announces that a group member runs The Profit and is ready to share tracked items (hello, reply, goodbye).
+| The Profit
+|-
+| 301
+| TheProfitTable
+| Sends the full list of tracked items (item id, item hash, highest unit price to pay) to group members.
+| The Profit
+|-
+| 302
+| TheProfitDelta
+| Sends tracked items added to or removed from the list, so group members' copies stay current.
+| The Profit
+|-
+| 303
+| TheProfitDeal
+| Reports guild store lots matching items other group members track, found during one store visit (kiosk label; per lot: item id, hash, unit price, quantity, guild id).
+| The Profit
+|-
+| colspan="4" | ''304-309 reserved for The Profit''
+|-
+| 330
+| ElmsMarkersProtocol
+| Sends single marker adds/removes and rendezvous commands from the group lead to group members
+| Elm's Markers U51
+|-
+| 331
+| ElmsMarkersZoneSyncProtocol
+| Shares all markers of the current zone with the group (HEADER -> DATA -> END stream)
+| Elm's Markers U51
+|-
+| 332
+| reserved for ElmsMarkers
+| (if the addon is no longer maintained, ids 330-332 will be freed)
+| Elm's Markers U51
+|-
+| 333
+| NTRS_Protocol
+| Syncs raid lead signals to group members
+| NextTry RaidCommander
+|-
+| 334
+| ENS_Protocol
+| Syncs events to group members
+| Event Notifier
+|-
+| 335
+| HWK_Protocol
+| Syncs events to raidcommander
+| Hawkinator
+|-
+| 340
+| ResParseScoresheet
+| Syncs ResParse tabulation across participating user GUIs
+| ResParse
+|-
+| 360
+| SuperStarBuildSummary
+| Provide concise build information sharing among team members
+| SuperStar
+|-
+| colspan="4" | ''361-369 reserved for SuperStar''
+|-
+| colspan="4" | ''370-379 reserved for Xhrysanth's forthcoming XPlus add-ons.''
+|-
+| 391
+| FarmingPartyPlusSyncLoot
+| Shares fishing and gutting sync state, including processed fish subtraction, Fish / Perfect Roe results, and stack replay recovery after reset or late join.
+| FarmingPartyPlus
+|-
+| 418
+| WBattleSense
+| Shares Combat data to groupmembers to track
+| BattleSense
+|-
+| 420
+| InspectVestigeLoadout
+| Serialized character loadout (gear, skill bars incl. werewolf bar, champion points, attributes, per-bar stats, mundus, food, potion, vampire/werewolf, class mastery/subclass), plus the inspect requests, friends-only replies and presence beacons that go with it, between group members
+| Inspect Vestige
+|-
+| 421
+| InspectVestigeCosmetics
+| Serialized character cosmetics (per-slot outfit styles and dyes, plus costume, skin, hat, personality, polymorph, adornments, markings, mount and pet) and the requests that ask for them, between group members
+| Inspect Vestige
+|-
+| colspan="4" | ''422-429 reserved for Inspect Vestige''
+|-
+| colspan="4" | ''430-437 reserved for Battle Scrolls''
+|-
+| 438
+| BattleScrolls_DPSHPSData
+| Shares DPS and HPS calculated by Battle Scrolls
+| Battle Scrolls (console only)
+|-
+| colspan="4" | ''439 reserved for Battle Scrolls''
+|-
+| colspan="4" | ''440-449 reserved for teamshadows''
+|-
+| 440 
+| libTeamshadows
+| information sharing, ping, pull, timer
+|-
+| 441
+| TeamShadowsManager 
+| information sharing, ping, pull, timer
+|-
+| 442
+| TeamShadowsBuff 
+| information sharing
+|-
+| 443
+| TeamShadowsManager 
+| information sharing
+|-
+| colspan="4" | ''444-449 reserved for TeamShadowsSuite.''
+|-
+|450-459
+|reserved for JWBTools
+|pvp group tools ulti and timing sharing markers etc.. 
+|work in progress
+|-
+|460
+|PBsTetrisVersus
+|Sends versus match data (garbage lines, match state and results) between two group members.
+|PB's Tamriel de Tetris
+|-
+|461
+|PBsJanken
+|Sends rock-paper-scissors challenges, hands and results between group members.
+|PB's Tamriel de Janken
+|-
+|462
+|PBsTranslateDictionary
+|Shares a player's own dictionary entries with a chosen group member, only after the recipient accepts.
+|PB's Translate
+|-
+|463
+|PBsWarTable
+|Sends moves and game state for two-player War Table matches between group members.
+|PB's War Table
+|-
+|464
+|PBsEmoteSyncV1
+|Plays the group leader’s emotes on every member’s character. The leader sends the emote id; members replay it.
+|PB's EmoteSynchronizer
+|-
+| colspan="4" | ''465-469 rreserved for PinkBanther's add-ons''
+|-
+| 480
+| PermMementoSync
+| Tells group members which memento to play, or to stop.
+| Permanent Memento
+|-
+| colspan="4" | ''481-489 reserved for Permanent Memento''
+|-
+| 500-509
+| CombatCoordinates
+| Shares 3D world coordinates and tracking information for combat ground effects (e.g. Standard of Might, Heals, Buffs).
+| CombatCoordinates
+|-
+| 511
+| reserved
+| you can use this id for local testing if you haven't picked one yet
+|- style="background: #FF6868"
+| 512
+| Share data
+| Sends Data to Group
+| StalkYou
+|- style="background: #FF6868"
+| 513
+| EZO_CORE_GROUP_V1
+| Shares EZO family addon presence and compact informational group state, including activity and optional performance status.
+| EZOCore
+|}
+(Add more rows as needed)
+
+'''IMPORTANT: The highest supported id is 511. Anything above that won't work correctly!'''
+
+[[Category:LIBS]]

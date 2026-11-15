@@ -45,9 +45,14 @@ ESO_API_DOC_FILE = r"Q:\Tools\!Spiele\TESO\EsoUI\esoui_src\live\ESOUIDocumentati
 ESO_EXTRA_GLOBALS_FILE = r"Q:\Tools\!Spiele\TESO\EsoUI\!!Parser\eso-api_base_Manual_NonGenerated.lua"
 
 # Relative paths resolve against the project root (parent of src/)
-ESO_UNDOCUMENTED_GLOBALS_FILE = "eso_undocumented_globals.lua"
-ESO_XML_SCHEMA_FILE = r"_XSD\esoui_gui_xml.xsd"
-ESO_BINDINGS_SCHEMA_FILE = r"_XSD\esobindings.xsd"
+ADD_INPUT_DIR = "add_input"
+ESO_UNDOCUMENTED_GLOBALS_FILE = os.path.join(ADD_INPUT_DIR, "eso_undocumented_globals.lua")
+ESO_XML_SCHEMA_FILE = os.path.join(ADD_INPUT_DIR, "_XSD", "esoui_gui_xml.xsd")
+ESO_BINDINGS_SCHEMA_FILE = os.path.join(ADD_INPUT_DIR, "_XSD", "esobindings.xsd")
+WIKI_EVENT_FILTERS_FILE = os.path.join(ADD_INPUT_DIR, "wiki_event_filters.json")
+WIKI_LGB_IDS_TXT_FILE = os.path.join(ADD_INPUT_DIR, "LibGroupBroadcast_IDs.txt")
+
+
 
 ESO_ADDONS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Elder Scrolls Online", "live", "AddOns")
 
@@ -99,12 +104,23 @@ def get_project_root_dir():
 
 
 def resolve_config_file_path(file_setting):
-    """Resolves a config file path; relative paths are resolved against the project root directory."""
+    """Resolves a config file path against project root (with fallback from add_input/ to legacy root)."""
     if not file_setting or not isinstance(file_setting, str):
         return None
     if os.path.isabs(file_setting):
         return file_setting
-    return os.path.join(get_project_root_dir(), file_setting)
+    root_dir = get_project_root_dir()
+    candidate = os.path.join(root_dir, file_setting)
+    if os.path.exists(candidate):
+        return candidate
+    norm_rel = file_setting.replace("\\", "/")
+    prefix = ADD_INPUT_DIR.replace("\\", "/").rstrip("/") + "/"
+    if norm_rel.startswith(prefix):
+        legacy_candidate = os.path.join(root_dir, norm_rel[len(prefix):].replace("/", os.sep))
+        if os.path.exists(legacy_candidate):
+            return legacy_candidate
+    return candidate
+
 
 
 def print_wrapped_tree_item(text, first_prefix="    │     ", next_prefix="    │       ", color=""):

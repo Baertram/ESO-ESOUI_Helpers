@@ -5,9 +5,29 @@ Statische Python-Codeanalyse für ESO Lua-, Manifest- (.addon/.txt) und XML-Date
 import json
 import os
 import re
+import subprocess
 import urllib.request
 from collections import defaultdict
 from datetime import datetime
+
+
+def _fetch_esoui_wiki_text(url, accept_header="text/html,application/json,*/*;q=0.8", timeout_sec=6):
+    """Fetches a page/API response from ://esoui.com via urllib with automatic curl fallback on HTTP 403."""
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": accept_header})
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        res = subprocess.run(
+            ["curl", "-fsSL", "--max-time", str(timeout_sec + 2), "-A", ua, "-H", f"Accept: {accept_header}", url],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=True,
+        )
+        return res.stdout
 
 from src.esoui_config import (
     C,
@@ -18,9 +38,12 @@ from src.esoui_config import (
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
     LUA_STD_LIBS,
+    WIKI_EVENT_FILTERS_FILE,
+    WIKI_LGB_IDS_TXT_FILE,
     print_wrapped_tree_item,
     resolve_config_file_path,
 )
+
 
 from src.esoui_ram_index import (
     ESOUI_EVENT_HAS_UNIT_TAG,
@@ -48,9 +71,10 @@ XML_SCHEMA_WARNED = set()
 BATCH_LEAK_TRACKER = defaultdict(list)
 BATCH_BEST_PRACTICE_TRACKER = defaultdict(list)
 
-WIKI_EVENT_FILTERS_CACHE_FILE = os.path.join("Cache", "wiki_event_filters_cache.json")
+WIKI_EVENT_FILTERS_CACHE_FILE = WIKI_EVENT_FILTERS_FILE
 _WIKI_EVENT_FILTER_SESSION_LOADED = False
 _WIKI_DYNAMIC_EVENT_RULES = {}
+
 
 # ==============================================================================
 # WARTUNGSHINWEIS / HOW TO ADD NEW ESO EVENT FILTERS
@@ -185,17 +209,9 @@ def _sync_wiki_event_filters_once():
     fetch_url = next(iter(ESOUI_WIKI_EVENT_FILTERS_URL.split("#", 1)))
     mapping = {}
     try:
-        req = urllib.request.Request(
-            fetch_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            html_body = resp.read().decode("utf-8", errors="ignore")
-
+        html_body = _fetch_esoui_wiki_text(fetch_url, accept_header="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", timeout_sec=5)
         mapping = _parse_wiki_event_filter_html(html_body)
+
         if mapping:
             try:
                 os.makedirs(os.path.dirname(WIKI_EVENT_FILTERS_CACHE_FILE), exist_ok=True)
@@ -232,9 +248,15 @@ def _sync_wiki_event_filters_once():
             }
 
 
-WIKI_LGB_IDS_CACHE_FILE = os.path.join("Cache", "wiki_lgb_ids_cache.json")
+WIKI_LGB_IDS_RAW_TXT_FILE = WIKI_LGB_IDS_TXT_FILE
 _WIKI_LGB_SESSION_LOADED = False
 _WIKI_LGB_CACHE = {"protocols": {}, "events": {}}
+_WIKI_LGB_FETCH_ERROR = None
+
+def get_wiki_lgb_fetch_error():
+    """Returns '[Error] Access to ESOUI Wiki LibGroupBroadcast failed' if live wiki fetch failed, else None."""
+    return _WIKI_LGB_FETCH_ERROR
+
 
 
 def _parse_wiki_lgb_ids_html(html_text):
@@ -302,19 +324,33 @@ def _parse_wiki_lgb_ids_html(html_text):
 
 
 def _parse_wiki_lgb_ids_wikitext(wikitext):
-    """Parst MediaWiki-Wikitext von LibGroupBroadcast_IDs (inkl. colspan-Reservierungen und ID-Ranges)."""
+    """Parst MediaWiki-Wikitext von LibGroupBroadcast_IDs (inkl. colspan-Reservierungen, 3-Spalten-Zeilen und ID-Ranges)."""
     protocols = {}
     events = {}
     current_kind = None
     rows = re.split(r"^\|\-\s*.*$", wikitext, flags=re.MULTILINE)
 
+    def _pick_addon_from_cells(cell_list):
+        c3 = cell_list if len(cell_list) >= 4 else ""
+        c1 = cell_list if len(cell_list) >= 2 else ""
+        if c3 and c3 != "-" and c3.lower() != "work in progress":
+            return c3
+        if c1 and c1 != "-":
+            return c1
+        return ""
+
     for block in rows:
         for hm in re.finditer(r"^==+\s*([^=]+?)\s*==+", block, flags=re.MULTILINE):
             h_low = hm.group(1).strip().lower()
-            if "protocol" in h_low:
+            if "handler" in h_low:
+                current_kind = None
+            elif "protocol" in h_low:
                 current_kind = "protocols"
             elif "event" in h_low:
                 current_kind = "events"
+
+        if current_kind not in ("protocols", "events"):
+            continue
 
         cells = []
         for raw_ln in block.splitlines():
@@ -335,7 +371,7 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
         if not cells:
             continue
 
-        col0 = cells[0]
+        col0 = cells
         id_range = []
         addon_info = ""
 
@@ -345,18 +381,12 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
 
         if col0.isdigit():
             id_range = [int(col0)]
-            if len(cells) >= 4 and cells[3]:
-                addon_info = cells[3]
-            elif len(cells) >= 2 and cells[1]:
-                addon_info = cells[1]
+            addon_info = _pick_addon_from_cells(cells)
         elif range_col0_m:
             lo, hi = int(range_col0_m.group(1)), int(range_col0_m.group(2))
             if 0 <= lo <= hi <= 2048:
                 id_range = list(range(lo, hi + 1))
-            if len(cells) >= 4 and cells[3]:
-                addon_info = cells[3]
-            elif len(cells) >= 2 and cells[1]:
-                addon_info = cells[1]
+            addon_info = _pick_addon_from_cells(cells)
         elif inline_range_m:
             lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
             if 0 <= lo <= hi <= 2048:
@@ -366,7 +396,66 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
             id_range = [int(inline_single_m.group(1))]
             addon_info = inline_single_m.group(2).strip()
 
-        if not id_range or not addon_info:
+        if not id_range or not addon_info or addon_info == "-":
+            continue
+
+        target_map = events if current_kind == "events" else protocols
+        for nid in id_range:
+            target_map[nid] = addon_info
+
+    return {"protocols": protocols, "events": events}
+
+
+def _parse_wiki_lgb_ids_plain_table(raw_text):
+    """Parst kopierte Wiki-Tabellen (Tab-getrennt oder '200 reserved for ...') als Fallback."""
+    protocols = {}
+    events = {}
+    current_kind = None
+    for raw_ln in raw_text.splitlines():
+        line = raw_ln.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if "protocol" in low and not line[0].isdigit():
+            current_kind = "protocols"
+            continue
+        if ("custom event" in low or "event id" in low or low == "events") and not line[0].isdigit():
+            current_kind = "events"
+            continue
+
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        col0 = parts[0] if parts else line
+        id_range = []
+        addon_info = ""
+
+        range_m = re.match(r"^(\d+)\s*-\s*(\d+)$", col0)
+        inline_range_m = re.match(r"^(\d+)\s*-\s*(\d+)\s+(.+)$", line)
+        inline_single_m = re.match(r"^(\d+)\s+(.+)$", line)
+
+        if col0.isdigit():
+            id_range = [int(col0)]
+            if len(parts) >= 4 and parts[3] != "-":
+                addon_info = parts[3]
+            elif len(parts) >= 2 and parts[1] != "-":
+                addon_info = parts[1]
+        elif range_m:
+            lo, hi = int(range_m.group(1)), int(range_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            if len(parts) >= 4 and parts[3] != "-":
+                addon_info = parts[3]
+            elif len(parts) >= 2 and parts[1] != "-":
+                addon_info = parts[1]
+        elif inline_range_m:
+            lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            addon_info = inline_range_m.group(3).strip()
+        elif inline_single_m:
+            id_range = [int(inline_single_m.group(1))]
+            addon_info = inline_single_m.group(2).strip()
+
+        if not id_range or not addon_info or addon_info == "-":
             continue
 
         target_map = events if current_kind == "events" else protocols
@@ -383,8 +472,8 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
 
 
 def _sync_wiki_lgb_ids_once():
-    """Lädt die registrierten LibGroupBroadcast Protocol- und Event-IDs 1x pro Session."""
-    global _WIKI_LGB_SESSION_LOADED
+    """Lädt LibGroupBroadcast Protocol- & Event-IDs 1x pro Session mit Fallback auf WIKI_LGB_IDS_TXT_FILE."""
+    global _WIKI_LGB_SESSION_LOADED, _WIKI_LGB_FETCH_ERROR
     if _WIKI_LGB_SESSION_LOADED:
         return
     _WIKI_LGB_SESSION_LOADED = True
@@ -392,16 +481,11 @@ def _sync_wiki_lgb_ids_once():
     base_page_url = next(iter(ESOUI_WIKI_LGB_PROTOCOLS_URL.split("#", 1)))
     wiki_root = base_page_url.rsplit("/", 1)[0]
     api_url = f"{wiki_root}/api.php?action=parse&page=LibGroupBroadcast_IDs&prop=wikitext&format=json"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "application/json,text/html,*/*;q=0.8",
-    }
 
     parsed_data = {}
     try:
-        req = urllib.request.Request(api_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        raw_json = _fetch_esoui_wiki_text(api_url, accept_header="application/json,*/*;q=0.8", timeout_sec=6)
+        payload = json.loads(raw_json)
         wikitext = ((payload.get("parse") or {}).get("wikitext") or {}).get("*") or ""
         if wikitext:
             parsed_data = _parse_wiki_lgb_ids_wikitext(wikitext)
@@ -410,35 +494,27 @@ def _sync_wiki_lgb_ids_once():
 
     if not parsed_data.get("protocols") and not parsed_data.get("events"):
         try:
-            req_html = urllib.request.Request(base_page_url, headers=headers)
-            with urllib.request.urlopen(req_html, timeout=6) as resp_h:
-                html_body = resp_h.read().decode("utf-8", errors="ignore")
+            html_body = _fetch_esoui_wiki_text(base_page_url, accept_header="text/html,application/xhtml+xml,*/*;q=0.8", timeout_sec=6)
             parsed_data = _parse_wiki_lgb_ids_html(html_body)
-        except Exception as wiki_err:
-            print(f"    │     {C.YELLOW}[WARN] Could not fetch LibGroupBroadcast Wiki IDs ({wiki_err}), using local cache if available.{C.RESET}")
-
-    if parsed_data.get("protocols") or parsed_data.get("events"):
-        try:
-            os.makedirs(os.path.dirname(WIKI_LGB_IDS_CACHE_FILE), exist_ok=True)
-            serializable = {
-                "protocols": {str(k): v for k, v in parsed_data["protocols"].items()},
-                "events": {str(k): v for k, v in parsed_data["events"].items()},
-            }
-            with open(WIKI_LGB_IDS_CACHE_FILE, "w", encoding="utf-8") as cf:
-                json.dump(serializable, cf, indent=2, sort_keys=True)
-        except OSError:
-            pass
-    elif os.path.isfile(WIKI_LGB_IDS_CACHE_FILE):
-        try:
-            with open(WIKI_LGB_IDS_CACHE_FILE, "r", encoding="utf-8") as cf:
-                loaded = json.load(cf)
-            if isinstance(loaded, dict):
-                parsed_data = {
-                    "protocols": {int(k): v for k, v in (loaded.get("protocols") or {}).items() if str(k).isdigit()},
-                    "events": {int(k): v for k, v in (loaded.get("events") or {}).items() if str(k).isdigit()},
-                }
         except Exception:
             pass
+
+    if parsed_data.get("protocols") or parsed_data.get("events"):
+        _WIKI_LGB_FETCH_ERROR = None
+    else:
+        _WIKI_LGB_FETCH_ERROR = "[Error] Access to ESOUI Wiki LibGroupBroadcast failed"
+        print(f"    │     {C.RED}{_WIKI_LGB_FETCH_ERROR}{C.RESET}")
+
+        txt_path = resolve_config_file_path(WIKI_LGB_IDS_RAW_TXT_FILE) or WIKI_LGB_IDS_RAW_TXT_FILE
+        if os.path.isfile(txt_path):
+            try:
+                with open(txt_path, "r", encoding="utf-8", errors="ignore") as tf:
+                    local_txt = tf.read()
+                parsed_data = _parse_wiki_lgb_ids_wikitext(local_txt)
+                if not parsed_data.get("protocols") and not parsed_data.get("events"):
+                    parsed_data = _parse_wiki_lgb_ids_plain_table(local_txt)
+            except Exception:
+                pass
 
     _WIKI_LGB_CACHE["protocols"] = dict(parsed_data.get("protocols") or {})
     _WIKI_LGB_CACHE["events"] = dict(parsed_data.get("events") or {})
