@@ -99,3 +99,46 @@ python esoui_codecheck.py
 ```bash
 python smoke_test.py
 ```
+
+
+
+## Local AI Setup (Ollama)
+
+The add-on checker uses a local **Ollama** LLM (default: `qwen2.5-coder:14b`) to semantically review files containing unverified globals or valid XML structures without sending any add-on code to external cloud services.
+
+### 1. Optional: Configure a Custom Model Directory (e.g. `D:\OllamaModels`)
+By default, Ollama stores downloaded models under `C:\Users\<USER>\.ollama\models`. To store large models on a different drive before downloading them:
+1. Create your target folder (e.g. `D:\OllamaModels`).
+2. Open **Edit the system environment variables** in Windows and click **Environment Variables...**.
+3. Under **User variables**, click **New...** and set:
+   - **Variable name**: `OLLAMA_MODELS`
+   - **Variable value**: `D:\OllamaModels`
+4. Confirm with **OK**.
+
+### 2. Install Ollama (Standard or Custom Path)
+1. Download `OllamaSetup.exe` from [ollama.com](https://ollama.com).
+2. To install into the default path, run `OllamaSetup.exe` normally.
+3. To install into a custom directory (e.g. `D:\Ollama`), open a terminal in your Downloads folder and run:
+   ```powershell
+   .\OllamaSetup.exe /DIR="D:\Ollama"
+   ```
+   The installer automatically registers Ollama in your system `PATH`.
+
+### 3. Download & Verify the Default Model (`qwen2.5-coder:14b`)
+Open a **new** terminal window (so the updated environment variables are loaded) and pull/test the default coding model:
+```bash
+ollama run qwen2.5-coder:14b
+```
+Once the download finishes and the model responds, you can exit the interactive prompt with `/bye`.
+
+### 4. Install the Python Client & Configure `src/esoui_config.py`
+1. Install the official Python client library:
+   ```bash
+   pip install ollama
+   ```
+2. In `src/esoui_config.py`, verify or adjust the AI settings if needed:
+   - `MODEL_NAME = "qwen2.5-coder:14b"`
+   - `OLLAMA_HOST = "http://localhost:11434"`
+   - `AI_NUM_CTX = 16384`
+3. **Everyday Usage**: When an add-on requires an AI review, `esoui_codecheck.py` automatically checks whether the Ollama server is running, starts `ollama serve` in the background if needed, and verifies that the configured model is available locally. If Ollama is not installed, the checker falls back cleanly to static RAM-tracker reporting.
+
