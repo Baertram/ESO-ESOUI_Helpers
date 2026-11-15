@@ -12,6 +12,8 @@ from datetime import datetime
 from src.esoui_config import (
     C,
     ESOUI_WIKI_EVENT_FILTERS_URL,
+    ESOUI_WIKI_LGB_EVENTS_URL,
+    ESOUI_WIKI_LGB_PROTOCOLS_URL,
     ESO_BINDINGS_SCHEMA_FILE,
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
@@ -214,15 +216,349 @@ def _sync_wiki_event_filters_once():
     for ev_name, flt_list in mapping.items():
         if not isinstance(flt_list, list) or not flt_list:
             continue
+        cleaned_flts = [
+            f for f in flt_list
+            if f not in ("REGISTER_FILTER_INVALID", "REGISTER_FILTER_IS_IN_GAMEPAD_PREFERRED_MODE")
+        ]
+        if not cleaned_flts:
+            continue
         if ev_name in EVENT_FILTER_RULES:
-            EVENT_FILTER_RULES[ev_name]["filters"].update(flt_list)
+            EVENT_FILTER_RULES[ev_name]["filters"].update(cleaned_flts)
         else:
             topic = ev_name.removeprefix("EVENT_").replace("_", " ").lower()
             _WIKI_DYNAMIC_EVENT_RULES[ev_name] = {
-                "filters": set(flt_list),
+                "filters": set(cleaned_flts),
                 "rule_title": f"Use event filters for {topic} instead of checking code slower in lua",
             }
 
+
+WIKI_LGB_IDS_CACHE_FILE = os.path.join("Cache", "wiki_lgb_ids_cache.json")
+_WIKI_LGB_SESSION_LOADED = False
+_WIKI_LGB_CACHE = {"protocols": {}, "events": {}}
+
+
+def _parse_wiki_lgb_ids_html(html_text):
+    """Parst Protocols- und Events-Tabellen (id -> addon/reservation, inkl. ID-Ranges) von LibGroupBroadcast_IDs."""
+    protocols = {}
+    events = {}
+    current_kind = None
+    for token in re.findall(r"(<h[1-6]\b[^>]*>.*?</h[1-6]>|<tr\b[^>]*>.*?</tr>)", html_text, flags=re.DOTALL | re.IGNORECASE):
+        if token.lower().startswith("<h"):
+            plain_h = re.sub(r"<[^>]+>", " ", token).strip().lower()
+            if "protocol" in plain_h:
+                current_kind = "protocols"
+            elif "event" in plain_h:
+                current_kind = "events"
+            continue
+        cells = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", token, flags=re.DOTALL | re.IGNORECASE)
+        if not cells:
+            continue
+        cleaned_cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip() for c in cells]
+        col0 = cleaned_cells[0]
+        id_range = []
+        addon_info = ""
+
+        range_col0_m = re.match(r"^(\d+)\s*-\s*(\d+)$", col0)
+        inline_range_m = re.match(r"^(\d+)\s*-\s*(\d+)\s+(.+)$", col0)
+        inline_single_m = re.match(r"^(\d+)\s+(.+)$", col0)
+
+        if col0.isdigit():
+            id_range = [int(col0)]
+            if len(cleaned_cells) >= 4 and cleaned_cells[3]:
+                addon_info = cleaned_cells[3]
+            elif len(cleaned_cells) >= 2 and cleaned_cells[1]:
+                addon_info = cleaned_cells[1]
+        elif range_col0_m:
+            lo, hi = int(range_col0_m.group(1)), int(range_col0_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            if len(cleaned_cells) >= 4 and cleaned_cells[3]:
+                addon_info = cleaned_cells[3]
+            elif len(cleaned_cells) >= 2 and cleaned_cells[1]:
+                addon_info = cleaned_cells[1]
+        elif inline_range_m:
+            lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            addon_info = inline_range_m.group(3).strip()
+        elif inline_single_m:
+            id_range = [int(inline_single_m.group(1))]
+            addon_info = inline_single_m.group(2).strip()
+
+        if not id_range or not addon_info:
+            continue
+
+        target_map = events if current_kind == "events" else protocols
+        for nid in id_range:
+            if current_kind in ("protocols", "events"):
+                target_map[nid] = addon_info
+            else:
+                if nid not in protocols:
+                    protocols[nid] = addon_info
+                else:
+                    events[nid] = addon_info
+    return {"protocols": protocols, "events": events}
+
+
+
+def _parse_wiki_lgb_ids_wikitext(wikitext):
+    """Parst MediaWiki-Wikitext von LibGroupBroadcast_IDs (inkl. colspan-Reservierungen und ID-Ranges)."""
+    protocols = {}
+    events = {}
+    current_kind = None
+    rows = re.split(r"^\|\-\s*.*$", wikitext, flags=re.MULTILINE)
+
+    for block in rows:
+        for hm in re.finditer(r"^==+\s*([^=]+?)\s*==+", block, flags=re.MULTILINE):
+            h_low = hm.group(1).strip().lower()
+            if "protocol" in h_low:
+                current_kind = "protocols"
+            elif "event" in h_low:
+                current_kind = "events"
+
+        cells = []
+        for raw_ln in block.splitlines():
+            s = raw_ln.strip()
+            if not s.startswith("|") or s.startswith("|}") or s.startswith("{|"):
+                continue
+            row_body = s[1:]
+            for part in row_body.split("||"):
+                if "|" in part and re.match(r"^\s*(?:colspan|rowspan|style|class|align)\b", part, flags=re.IGNORECASE):
+                    part = part.split("|", 1)[-1]
+                clean_cell = re.sub(r"'{2,}", "", part)
+                clean_cell = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", clean_cell)
+                clean_cell = re.sub(r"\[\[([^\]]+)\]\]", r"\1", clean_cell)
+                clean_cell = re.sub(r"<[^>]+>", " ", clean_cell)
+                clean_cell = re.sub(r"\s+", " ", clean_cell).strip()
+                cells.append(clean_cell)
+
+        if not cells:
+            continue
+
+        col0 = cells[0]
+        id_range = []
+        addon_info = ""
+
+        range_col0_m = re.match(r"^(\d+)\s*-\s*(\d+)$", col0)
+        inline_range_m = re.match(r"^(\d+)\s*-\s*(\d+)\s+(.+)$", col0)
+        inline_single_m = re.match(r"^(\d+)\s+(.+)$", col0)
+
+        if col0.isdigit():
+            id_range = [int(col0)]
+            if len(cells) >= 4 and cells[3]:
+                addon_info = cells[3]
+            elif len(cells) >= 2 and cells[1]:
+                addon_info = cells[1]
+        elif range_col0_m:
+            lo, hi = int(range_col0_m.group(1)), int(range_col0_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            if len(cells) >= 4 and cells[3]:
+                addon_info = cells[3]
+            elif len(cells) >= 2 and cells[1]:
+                addon_info = cells[1]
+        elif inline_range_m:
+            lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
+            if 0 <= lo <= hi <= 2048:
+                id_range = list(range(lo, hi + 1))
+            addon_info = inline_range_m.group(3).strip()
+        elif inline_single_m:
+            id_range = [int(inline_single_m.group(1))]
+            addon_info = inline_single_m.group(2).strip()
+
+        if not id_range or not addon_info:
+            continue
+
+        target_map = events if current_kind == "events" else protocols
+        for nid in id_range:
+            if current_kind in ("protocols", "events"):
+                target_map[nid] = addon_info
+            else:
+                if nid not in protocols:
+                    protocols[nid] = addon_info
+                else:
+                    events[nid] = addon_info
+
+    return {"protocols": protocols, "events": events}
+
+
+def _sync_wiki_lgb_ids_once():
+    """Lädt die registrierten LibGroupBroadcast Protocol- und Event-IDs 1x pro Session."""
+    global _WIKI_LGB_SESSION_LOADED
+    if _WIKI_LGB_SESSION_LOADED:
+        return
+    _WIKI_LGB_SESSION_LOADED = True
+
+    base_page_url = next(iter(ESOUI_WIKI_LGB_PROTOCOLS_URL.split("#", 1)))
+    wiki_root = base_page_url.rsplit("/", 1)[0]
+    api_url = f"{wiki_root}/api.php?action=parse&page=LibGroupBroadcast_IDs&prop=wikitext&format=json"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/html,*/*;q=0.8",
+    }
+
+    parsed_data = {}
+    try:
+        req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        wikitext = ((payload.get("parse") or {}).get("wikitext") or {}).get("*") or ""
+        if wikitext:
+            parsed_data = _parse_wiki_lgb_ids_wikitext(wikitext)
+    except Exception:
+        pass
+
+    if not parsed_data.get("protocols") and not parsed_data.get("events"):
+        try:
+            req_html = urllib.request.Request(base_page_url, headers=headers)
+            with urllib.request.urlopen(req_html, timeout=6) as resp_h:
+                html_body = resp_h.read().decode("utf-8", errors="ignore")
+            parsed_data = _parse_wiki_lgb_ids_html(html_body)
+        except Exception as wiki_err:
+            print(f"    │     {C.YELLOW}[WARN] Could not fetch LibGroupBroadcast Wiki IDs ({wiki_err}), using local cache if available.{C.RESET}")
+
+    if parsed_data.get("protocols") or parsed_data.get("events"):
+        try:
+            os.makedirs(os.path.dirname(WIKI_LGB_IDS_CACHE_FILE), exist_ok=True)
+            serializable = {
+                "protocols": {str(k): v for k, v in parsed_data["protocols"].items()},
+                "events": {str(k): v for k, v in parsed_data["events"].items()},
+            }
+            with open(WIKI_LGB_IDS_CACHE_FILE, "w", encoding="utf-8") as cf:
+                json.dump(serializable, cf, indent=2, sort_keys=True)
+        except OSError:
+            pass
+    elif os.path.isfile(WIKI_LGB_IDS_CACHE_FILE):
+        try:
+            with open(WIKI_LGB_IDS_CACHE_FILE, "r", encoding="utf-8") as cf:
+                loaded = json.load(cf)
+            if isinstance(loaded, dict):
+                parsed_data = {
+                    "protocols": {int(k): v for k, v in (loaded.get("protocols") or {}).items() if str(k).isdigit()},
+                    "events": {int(k): v for k, v in (loaded.get("events") or {}).items() if str(k).isdigit()},
+                }
+        except Exception:
+            pass
+
+    _WIKI_LGB_CACHE["protocols"] = dict(parsed_data.get("protocols") or {})
+    _WIKI_LGB_CACHE["events"] = dict(parsed_data.get("events") or {})
+
+
+def _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, addon_ctx, lua_issues):
+    """Prüft DeclareProtocol- und DeclareCustomEvent-IDs gegen das ESOUI-Wiki, wenn LibGroupBroadcast genutzt wird."""
+    clean_code = strip_lua_comments_preserve_lines(content)
+    if "LibGroupBroadcast" not in clean_code and "DeclareProtocol" not in clean_code and "DeclareCustomEvent" not in clean_code:
+        return
+
+    # Addon-Namen & Dependencies aus den Manifesten ermitteln
+    addon_names_lower = set()
+    has_lgb_dep = "LibGroupBroadcast" in clean_code
+    if active_extract_dir and os.path.isdir(active_extract_dir):
+        for m_file in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+            addon_names_lower.add(os.path.splitext(m_file)[0].lower())
+        for root, _, files in os.walk(active_extract_dir):
+            for fn in files:
+                if fn.lower().endswith((".addon", ".txt")):
+                    try:
+                        with open(os.path.join(root, fn), "r", encoding="utf-8", errors="ignore") as mf:
+                            mf_txt = mf.read()
+                        if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", mf_txt, flags=re.MULTILINE | re.IGNORECASE):
+                            addon_names_lower.add(os.path.splitext(fn)[0].lower())
+                            if re.search(r"^\s*##\s*(?:Optional|PC|Console)?DependsOn\s*:.*\bLibGroupBroadcast\b", mf_txt, flags=re.MULTILINE | re.IGNORECASE):
+                                has_lgb_dep = True
+                    except Exception:
+                        pass
+
+    if not addon_names_lower:
+        parts = file_name.replace("\\", "/").split("/")
+        if len(parts) > 1:
+            addon_names_lower.add(parts[0].lower())
+
+    if not has_lgb_dep:
+        return
+
+    # Numerische Konstanten im gesamten Addon sammeln (z. B. local PROTOCOL_ID = 200)
+    num_consts = {}
+    if active_extract_dir and os.path.isdir(active_extract_dir):
+        for root, _, files in os.walk(active_extract_dir):
+            for fn in files:
+                if fn.lower().endswith(".lua"):
+                    try:
+                        with open(os.path.join(root, fn), "r", encoding="utf-8", errors="ignore") as lf:
+                            c_txt = strip_lua_comments_preserve_lines(lf.read())
+                        for cm in re.finditer(r"\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)\b", c_txt):
+                            num_consts[cm.group(1)] = int(cm.group(2))
+                    except Exception:
+                        pass
+    for cm in re.finditer(r"\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\d+)\b", clean_code):
+        num_consts[cm.group(1)] = int(cm.group(2))
+
+    lgb_aliases = {"LibGroupBroadcast"}
+    for am in re.finditer(r"\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*LibGroupBroadcast\b", clean_code):
+        lgb_aliases.add(am.group(1))
+
+    handler_vars = set()
+    for alias in lgb_aliases:
+        for hm in re.finditer(r"\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*" + re.escape(alias) + r"\s*:\s*RegisterHandler\s*\(", clean_code):
+            handler_vars.add(hm.group(1))
+
+    if not handler_vars:
+        return
+
+    def _resolve_id_expr(expr):
+        s = expr.strip()
+        if s.isdigit():
+            return int(s)
+        return num_consts.get(s)
+
+    protocols_found = []
+    events_found = []
+    for h_var in handler_vars:
+        for pm in re.finditer(r"\b" + re.escape(h_var) + r"\s*:\s*DeclareProtocol\s*\(", clean_code):
+            args_raw, _ = _extract_balanced_call_args(clean_code, pm.end() - 1)
+            if args_raw:
+                args = _split_top_level_lua_args(args_raw)
+                if args:
+                    pid = _resolve_id_expr(args[0])
+                    if pid is not None:
+                        ln = clean_code.count("\n", 0, pm.start()) + 1
+                        protocols_found.append((ln, pid))
+        for em in re.finditer(r"\b" + re.escape(h_var) + r"\s*:\s*DeclareCustomEvent\s*\(", clean_code):
+            args_raw, _ = _extract_balanced_call_args(clean_code, em.end() - 1)
+            if args_raw:
+                args = _split_top_level_lua_args(args_raw)
+                if args:
+                    eid = _resolve_id_expr(args[0])
+                    if eid is not None:
+                        ln = clean_code.count("\n", 0, em.start()) + 1
+                        events_found.append((ln, eid))
+
+
+    if not protocols_found and not events_found:
+        return
+
+    _sync_wiki_lgb_ids_once()
+    wiki_protos = _WIKI_LGB_CACHE.get("protocols") or {}
+    wiki_events = _WIKI_LGB_CACHE.get("events") or {}
+
+    def _is_owner_match(wiki_addon):
+        if not wiki_addon or wiki_addon == "?":
+            return False
+        w_low = wiki_addon.strip().lower()
+        return any(w_low == an or w_low.startswith(an + " ") or an in re.split(r"[^a-z0-9_-]+", w_low) for an in addon_names_lower)
+
+    for ln, pid in sorted(protocols_found, key=lambda x: x):
+        p_wiki = wiki_protos.get(pid, "?")
+        if not _is_owner_match(p_wiki):
+            desc = f"Protocol ID {pid} (Wiki AddOn: {p_wiki})"
+            lua_issues.append(f"LibGroupBroadcast Protocoll [{pid}] conflict (line {ln}): ({desc})")
+
+    for ln, eid in sorted(events_found, key=lambda x: x):
+        e_wiki = wiki_events.get(eid, "?")
+        if not _is_owner_match(e_wiki):
+            desc = f"Event ID {eid} (Wiki AddOn: {e_wiki})"
+            lua_issues.append(f"LibGroupBroadcast Event [{eid}] conflict (line {ln}): ({desc})")
+        
 def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
     """Single-pass Lua lexer stripping comments and optionally strings while keeping line numbers."""
     if not isinstance(content, str) or not content:
@@ -666,13 +1002,11 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
             if h_expr == handle_expr or any(ft in allowed_filters for ft, _ in pairs)
         ]
 
-        if not matching_handles:
-            lua_issues.append(f"{rule_title}: {ev_name} (line {line_no}) ({orig_line})")
-            continue
-
         cb_params, cb_body = [], ""
         if cb_expr.startswith("function"):
-            cb_params, cb_body = _extract_lua_function_body_from_offset(clean_code, m.start() + m.group(0).find("("))
+            fn_offset = clean_code.find("function", m.end())
+            if fn_offset != -1:
+                cb_params, cb_body = _extract_lua_function_body_from_offset(clean_code, fn_offset)
         else:
             cb_key = cb_expr.strip()
             if cb_key in func_bodies:
@@ -680,6 +1014,22 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
             elif cb_key.split(".")[-1].split(":")[-1] in func_bodies:
                 cb_params, cb_body = func_bodies[cb_key.split(".")[-1].split(":")[-1]]
 
+        if not matching_handles:
+            if allowed_filters and allowed_filters <= {"REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX"}:
+                sig = ESOUI_EVENT_PARAM_TYPES.get(ev_name, [])
+                unit_param_indices = [
+                    s_idx for s_idx, (s_type, s_name) in enumerate(sig, 1)
+                    if "unittag" in s_name.lower() or "unittag" in s_type.lower()
+                ]
+                if unit_param_indices:
+                    uses_unit_tag_arg = any(
+                        p_idx < len(cb_params) and cb_params[p_idx] and cb_params[p_idx] != "_"
+                        for p_idx in unit_param_indices
+                    )
+                    if not uses_unit_tag_arg:
+                        continue
+            lua_issues.append(f"{rule_title}: {ev_name} (line {line_no}) ({orig_line})")
+            continue
         if not cb_params or not cb_body:
             continue
 
@@ -1063,6 +1413,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     move_to_table_hits = []
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
     _check_lua_event_filters(content, raw_lines, lua_issues)
+    _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, addon_ctx, lua_issues)
     _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=move_to_table_hits)
     lua_suggestions = _check_lua_global_tables_and_locals(
         comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=dep_globals_set

@@ -65,6 +65,9 @@ ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX = _ESOUI_BASE + "/downloads/info"
 ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX = _ESOUI_BASE + "/downloads/dl"
 ESOUI_UPLOAD_RULES_URL = _ESOUI_BASE + "/forums/showthread.php?t=10790"
 ESOUI_WIKI_EVENT_FILTERS_URL = _ESOUI_WIKI_BASE + "/AddFilterForEvent#Filter_Types"
+ESOUI_WIKI_LGB_EVENTS_URL = _ESOUI_WIKI_BASE + "/LibGroupBroadcast_IDs#Events"
+ESOUI_WIKI_LGB_PROTOCOLS_URL = _ESOUI_WIKI_BASE + "/LibGroupBroadcast_IDs#Protocols"
+
 
 
 # Local Ollama model configuration

@@ -114,11 +114,29 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
 
         return parent_token_rx.sub(_repl, raw_name)
 
+    def _expand_inherited_suffixes(base_tpl_name, visited=None):
+        if not template_children_map:
+            return set()
+        if visited is None:
+            visited = set()
+        if base_tpl_name in visited:
+            return set()
+        visited.add(base_tpl_name)
+        entry = template_children_map.get(base_tpl_name)
+        if not entry:
+            return set()
+        if isinstance(entry, dict):
+            result_suffixes = set(entry.get("children") or ())
+            for parent_tpl in (entry.get("parents") or ()):
+                result_suffixes.update(_expand_inherited_suffixes(parent_tpl, visited))
+            return result_suffixes
+        return set(entry)
+
     for m in tag_rx.finditer(clean_xml):
         is_closing, tag_name, attrs, is_self_closing = m.groups()
         if is_closing:
             for i in range(len(tag_stack) - 1, -1, -1):
-                if tag_stack[i][0].lower() == tag_name.lower():
+                if tag_stack[i].lower() == tag_name.lower():
                     del tag_stack[i:]
                     break
             continue
@@ -134,7 +152,7 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
                     inh_m = inherits_attr_rx.search(attrs)
                     if inh_m:
                         for base_tpl in inh_m.group(1).split():
-                            for suffix_rel in template_children_map.get(base_tpl.strip(), ()):
+                            for suffix_rel in _expand_inherited_suffixes(base_tpl.strip()):
                                 full_inh_name = f"{resolved_name}{suffix_rel}"
                                 if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", full_inh_name):
                                     resolved_list.append((full_inh_name, line_no))
@@ -143,6 +161,50 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
             tag_stack.append((tag_name, resolved_name))
 
     return resolved_list
+
+
+def _collect_xml_templates_from_source(x_txt, xml_template_children):
+    """Extracts virtual XML templates (regardless of attribute order), nested $(parent) children, and parent inherits."""
+    clean_xml = re.sub(r"<!--.*?-->", "", x_txt, flags=re.DOTALL)
+    tag_rx = re.compile(r"<(/?)([A-Za-z_][A-Za-z0-9_:-]*)([^<>]*?)(/?)>", flags=re.DOTALL)
+    name_rx = re.compile(r'\bname\s*=\s*["\']([^"\']+)["\']')
+    virtual_rx = re.compile(r'\bvirtual\s*=\s*["\']true["\']', flags=re.IGNORECASE)
+    inherits_rx = re.compile(r'\binherits\s*=\s*["\']([^"\']+)["\']')
+
+    active_templates = []
+    tag_depth = 0
+
+    for m in tag_rx.finditer(clean_xml):
+        is_closing, tag_name, attrs, is_self_closing = m.groups()
+        if is_closing:
+            tag_depth = max(0, tag_depth - 1)
+            while active_templates and active_templates[-1] > tag_depth:
+                active_templates.pop()
+            continue
+
+        nm = name_rx.search(attrs)
+        raw_name = nm.group(1).strip() if nm else ""
+        is_virt = bool(virtual_rx.search(attrs))
+
+        if active_templates and raw_name.startswith("$(parent)"):
+            rel_suffix = raw_name[len("$(parent)"):]
+            if re.match(r"^[A-Za-z0-9_]+$", rel_suffix):
+                for _, tpl_name in active_templates:
+                    xml_template_children.setdefault(tpl_name, {"children": set(), "parents": []})["children"].add(rel_suffix)
+
+        if is_virt and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw_name):
+            tpl_entry = xml_template_children.setdefault(raw_name, {"children": set(), "parents": []})
+            inh_m = inherits_rx.search(attrs)
+            if inh_m:
+                for p_tpl in inh_m.group(1).split():
+                    p_clean = p_tpl.strip()
+                    if p_clean and p_clean not in tpl_entry["parents"]:
+                        tpl_entry["parents"].append(p_clean)
+            if not is_self_closing:
+                active_templates.append((tag_depth, raw_name))
+
+        if not is_self_closing:
+            tag_depth += 1
 
 
 def extract_virtual_controls_from_lua(lua_text, xml_templates_map=None):
@@ -375,18 +437,7 @@ def build_esoui_index_once():
                             with open(full_p, 'r', encoding='utf-8', errors='ignore') as xf:
                                 x_txt = xf.read()
                             if 'virtual="true"' in x_txt or "virtual='true'" in x_txt:
-                                for tpl_m in re.finditer(
-                                    r'<([A-Za-z_][A-Za-z0-9_:-]*)\b[^>]*\bname\s*=\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\'][^>]*\bvirtual\s*=\s*["\']true["\'][^>]*>',
-                                    x_txt,
-                                ):
-                                    tpl_tag, tpl_name = tpl_m.group(1), tpl_m.group(2)
-                                    end_tag = f"</{tpl_tag}>"
-                                    end_pos = x_txt.find(end_tag, tpl_m.end())
-                                    if end_pos != -1:
-                                        inner_xml = x_txt[tpl_m.end():end_pos]
-                                        child_rels = re.findall(r'\bname\s*=\s*["\']\$\(parent\)([A-Za-z0-9_]+)["\']', inner_xml)
-                                        if child_rels:
-                                            xml_template_children.setdefault(tpl_name, set()).update(child_rels)
+                                _collect_xml_templates_from_source(x_txt, xml_template_children)
                         except Exception:
                             pass
 

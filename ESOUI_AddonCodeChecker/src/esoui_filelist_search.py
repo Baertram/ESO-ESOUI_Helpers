@@ -399,9 +399,9 @@ def lookup_dependency_addon_version(
     filelist: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[int]:
     """
-    Sucht eine Dependency in der MMOUI v4 filelist.json über sub['path'] (z. B. 'LibAddonMenu-2.0',
-    'LibFilters-3.0' oder 'MasterMerchant/Libs/LibGuildStore') und liefert deren exakte
-    numerische 'addOnVersion' zurück (oder None, falls leer/nicht gesetzt -> [AddOnVersion unknown]).
+    Sucht eine Dependency in der MMOUI v4 filelist.json über sub['path'] / dir / name / title
+    und liefert deren exakte numerische 'addOnVersion' / 'addonVersion' zurück
+    (oder None, falls leer/nicht gesetzt -> [AddOnVersion unknown]).
     """
     target = dep_name.strip().lower()
     if not target:
@@ -411,6 +411,8 @@ def lookup_dependency_addon_version(
     except Exception:
         return None
 
+    fallback_title_ver: Optional[int] = None
+
     for entry in items:
         if not _is_live_addon(entry):
             continue
@@ -419,14 +421,43 @@ def lookup_dependency_addon_version(
             for sub in sub_addons:
                 if not isinstance(sub, dict):
                     continue
-                sub_path = str(sub.get("path") or "").replace("\\", "/").strip().lower()
-                sub_leaf = sub_path.rsplit("/", 1)[-1] if sub_path else ""
-                if target in (sub_path, sub_leaf):
-                    return _parse_numeric_addon_version(sub.get("addOnVersion"))
+                candidates = set()
+                for key in ("path", "dir", "folder", "name", "manifest"):
+                    raw_id = str(sub.get(key) or "").replace("\\", "/").strip().lower()
+                    if raw_id:
+                        stem = os.path.splitext(raw_id)[0]
+                        candidates.add(raw_id)
+                        candidates.add(stem)
+                        candidates.add(raw_id.rsplit("/", 1)[-1])
+                        candidates.add(stem.rsplit("/", 1)[-1])
+                if target in candidates:
+                    ver = _parse_numeric_addon_version(
+                        sub.get("addOnVersion") if sub.get("addOnVersion") is not None else sub.get("addonVersion")
+                    )
+                    if ver is not None:
+                        return ver
 
-        if _extract_title(entry).lower() == target:
-            return _parse_numeric_addon_version(entry.get("addOnVersion"))
-    return None
+        raw_title = _extract_title(entry).lower()
+        entry_ver = _parse_numeric_addon_version(
+            entry.get("addOnVersion") if entry.get("addOnVersion") is not None else entry.get("addonVersion")
+        )
+        if entry_ver is None and isinstance(sub_addons, list):
+            for sub in sub_addons:
+                if isinstance(sub, dict):
+                    entry_ver = _parse_numeric_addon_version(
+                        sub.get("addOnVersion") if sub.get("addOnVersion") is not None else sub.get("addonVersion")
+                    )
+                    if entry_ver is not None:
+                        break
+
+        if raw_title == target and entry_ver is not None:
+            return entry_ver
+        if fallback_title_ver is None and entry_ver is not None:
+            title_base = re.split(r"\s+[-–:|(]\s*", raw_title, maxsplit=1)[0].strip()
+            if title_base == target:
+                fallback_title_ver = entry_ver
+
+    return fallback_title_ver
 
 
 def annotate_depends_on_line(
@@ -463,13 +494,18 @@ def annotate_depends_on_line(
 
         latest_ver = lookup_dependency_addon_version(dep_name, filelist=filelist)
         if latest_ver is not None:
-            annotated_tokens.append(f"{token} {lb}current: {latest_ver}{rb}")
+            entry_str = f"{token} {lb}current: {latest_ver}{rb}"
             if not has_ge:
                 has_missing = True
+                annotated_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
             elif declared_ver is not None and declared_ver < latest_ver:
                 has_outdated = True
+                annotated_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
+            else:
+                annotated_tokens.append(token)
         else:
             annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
+
 
     return f"{header.strip()}: {' '.join(annotated_tokens)}", has_missing, has_outdated
 

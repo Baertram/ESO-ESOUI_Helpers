@@ -342,9 +342,9 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
             )
             if child is None and name.lower().endswith(".dds") and not is_bad:
                 dds_shown += 1
-                if dds_shown > 5:
+                if dds_shown > 1:
                     if not dds_truncated:
-                        out_lines.append(f"{lb}*{rb} ... other dds textures")
+                        out_lines.append(f"{lb}*{rb} ...")
                         dds_truncated = True
                     continue
 
@@ -763,6 +763,16 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 )
                 continue
 
+            lgb_m = re.match(
+                r"^LibGroupBroadcast (?:Protocoll/Event|Protocoll \[\d+\]|Event \[\d+\]) conflict\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if lgb_m:
+                line_no = int(lgb_m.group(1))
+                desc_txt = lgb_m.group(2).strip()
+                report_data.setdefault("lgb_conflicts", []).append((rel_norm, line_no, desc_txt))
+                continue
+
             pollution_m = re.match(
                 r"^Global Variable Pollution\s*\(missing 'local' for '([^']+)'\)\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
                 item_text,
@@ -835,8 +845,8 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                     report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
 
 
-def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=False):
-    """Builds the ESOUI BBCode report text; when compact_bp=True, collapses repeated Best Practice lines."""
+def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0):
+    """Builds the ESOUI BBCode report text; compact_bp=1 collapses per-var lines, compact_bp=2 groups per file."""
     lb, rb = chr(91), chr(93)
     out = [
         "Welcome. Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:",
@@ -867,9 +877,11 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
 
     unverified_entries = report_data.get("unverified_globals") or []
     pollution_entries = report_data.get("global_var_pollution") or []
+    lgb_entries = report_data.get("lgb_conflicts") or []
     has_crit = (
         bool(report_data["zip_violations"])
         or bool(pollution_entries)
+        or bool(lgb_entries)
         or any(bool(v) for v in report_data["critical"].values())
     )
     has_unverified = bool(unverified_entries)
@@ -888,7 +900,8 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
         for cat_key, cat_label in (("manifest", "Manifest (.addon / .txt)"), ("lua", "Lua Files"), ("xml", "XML Files")):
             rules_map = report_data["critical"].get(cat_key) or {}
             has_cat_pollution = (cat_key == "lua" and bool(pollution_entries))
-            if not rules_map and not has_cat_pollution:
+            has_cat_lgb = (cat_key == "manifest" and bool(lgb_entries))
+            if not rules_map and not has_cat_pollution and not has_cat_lgb:
                 continue
             out.append("")
             out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
@@ -925,6 +938,18 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
                         out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
 
+            if has_cat_lgb:
+                out.append(f"{lb}u{rb}LibGroupBroadcast Protocoll/Event conflict{lb}/u{rb}")
+                out.append(f"{lb}list{rb}")
+                sorted_lgb = sorted(
+                    lgb_entries,
+                    key=lambda item: (0 if item[2].startswith("Protocol") else 1, item[0].lower(), item[1]),
+                )
+                for f_path, ln_no, desc_txt in sorted_lgb:
+                    out.append(f"{lb}*{rb} {f_path}:{ln_no} - {desc_txt}")
+                out.append(f"{lb}/list{rb}")
+                out.append("Read the LibGroupBroadcast addon description and add your protocolls/events etc. properly to the ESOUI Wiki!")
+
     if has_unverified:
         out.append("")
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrchid"{rb}{lb}FONT="Impact"{rb}Unverified Globals{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
@@ -945,6 +970,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
         if outdated_entries:
             out.append("")
             out.append(f"{lb}u{rb}{outdated_dep_rule}{lb}/u{rb}")
+            out.append("Please verify via the ## AddOnVersion: tags of the actual zip files of your specified dependencies.")
             out.append(f"{lb}list{rb}")
             for f_path, ln_no, code_txt in outdated_entries:
                 loc = f"{f_path}:{ln_no}" if ln_no else f_path
@@ -957,26 +983,43 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
             out.append("")
             out.append(f"{lb}u{rb}Possible action: Global variable used multiple times without a local reference{lb}/u{rb}")
             out.append(f"{lb}list{rb}")
-            for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
-                files_map = grouped_globals[var_name]
-                total_hits = sum(len(hits) for hits in files_map.values())
-                spoiler_lines = []
-                for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
-                    spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
-                    hits_list = files_map[f_path]
-                    if compact_bp and len(hits_list) > 1:
-                        first_ln, first_code = hits_list[0]
-                        spoiler_lines.append(f"  {first_ln}: {first_code}")
-                        extra_lns = ", ".join(str(ln) for ln, _ in hits_list[1:])
-                        spoiler_lines.append(f"  Lines: {extra_lns}")
-                    else:
-                        for ln_no, code_txt in hits_list:
-                            spoiler_lines.append(f"  {ln_no}: {code_txt}")
-                spoiler_body = "\n".join(spoiler_lines)
-                out.append(
-                    f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
-                    f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
-                )
+            if int(compact_bp) >= 2:
+                per_file_vars = defaultdict(list)
+                for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
+                    for f_path, hits_list in grouped_globals[var_name].items():
+                        per_file_vars[f_path].append((var_name, hits_list))
+                for f_path in sorted(per_file_vars.keys(), key=lambda x: x.lower()):
+                    var_entries = per_file_vars[f_path]
+                    spoiler_lines = []
+                    for var_name, hits_list in var_entries:
+                        all_lns = ", ".join(str(ln) for ln, _ in hits_list)
+                        spoiler_lines.append(f"  {lb}b{rb}{var_name}{lb}/b{rb} (x{len(hits_list)}) - Lines: {all_lns}")
+                    spoiler_body = "\n".join(spoiler_lines)
+                    out.append(
+                        f'{lb}*{rb} {lb}b{rb}{f_path}{lb}/b{rb} ({len(var_entries)} globals) '
+                        f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                    )
+            else:
+                for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
+                    files_map = grouped_globals[var_name]
+                    total_hits = sum(len(hits) for hits in files_map.values())
+                    spoiler_lines = []
+                    for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
+                        spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
+                        hits_list = files_map[f_path]
+                        if int(compact_bp) == 1 and len(hits_list) > 1:
+                            first_ln, first_code = hits_list[0]
+                            spoiler_lines.append(f"  {first_ln}: {first_code}")
+                            extra_lns = ", ".join(str(ln) for ln, _ in hits_list[1:])
+                            spoiler_lines.append(f"  Lines: {extra_lns}")
+                        else:
+                            for ln_no, code_txt in hits_list:
+                                spoiler_lines.append(f"  {ln_no}: {code_txt}")
+                    spoiler_body = "\n".join(spoiler_lines)
+                    out.append(
+                        f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
+                        f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                    )
             out.append(f"{lb}/list{rb}")
 
         for bp_rule, entries in report_data["best_practices"].items():
@@ -1015,10 +1058,12 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=F
 
 
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
-    """Writes the compact, grouped ESOUI BBCode report, auto-compacting Best Practices if over ESOUI_COMMENT_MAX_CHARS."""
-    rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=False)
-    if len(rendered) > ESOUI_COMMENT_MAX_CHARS:
-        rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=True)
+    """Writes the compact, grouped ESOUI BBCode report, auto-compacting Best Practices until <= ESOUI_COMMENT_MAX_CHARS."""
+    rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0)
+    for level in (1, 2):
+        if len(rendered) <= ESOUI_COMMENT_MAX_CHARS:
+            break
+        rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=level)
 
     with open(report_file_path, "w", encoding="utf-8") as wf:
         wf.write(rendered)
@@ -1145,6 +1190,8 @@ def process_addon(zip_path, zip_name):
     all_flagged = set(report_data.get("zip_flagged_paths", set()))
     for f_path, _, _, _ in report_data.get("global_var_pollution") or []:
         all_flagged.add(f_path)
+    for f_path, _, _ in report_data.get("lgb_conflicts") or []:
+        all_flagged.add(f_path)
     for cat_rules in report_data["critical"].values():
         for entries in cat_rules.values():
             for f_path, _, _ in entries:
@@ -1164,6 +1211,7 @@ def process_addon(zip_path, zip_name):
     if os.path.exists(EXTRACT_FOLDER):
         shutil.rmtree(EXTRACT_FOLDER)
     addon_duration = (datetime.now() - addon_start_time).total_seconds()
+    clickable_zip_end = make_clickable_file_link(zip_path, color=C.WHITE, display_text=zip_name)
     print(f"\n{C.CYAN}[4/4] Report saved to:{C.RESET} {make_clickable_file_link(current_report_file)}")
-    print(f"{C.CYAN}{C.BOLD}  ADDON END:   {C.WHITE}{zip_name}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
+    print(f"{C.CYAN}{C.BOLD}  ADDON END:   {clickable_zip_end}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
     print(f"{C.CYAN}{C.BOLD}=================================================================={C.RESET}\n")
