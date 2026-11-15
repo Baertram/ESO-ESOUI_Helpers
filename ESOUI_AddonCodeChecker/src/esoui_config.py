@@ -27,7 +27,8 @@ BLOCKED_EXECUTABLE_EXTENSIONS = {
     '.app', '.command', '.jar', '.apk', '.elf', '.bin', '.run', '.reg'
 }
 FORBIDDEN_KEYWORDS = {'.github', '.vs', '.idea', '.git'}
-FORBIDDEN_OS_JUNK_NAMES = {'__macosx', 'thumbs.db', 'desktop.ini'}
+FORBIDDEN_OS_JUNK_NAMES = {"__macosx", "thumbs.db", "desktop.ini", ".ds_store"}
+EXCLUDED_DEPENDENCY_ADDON_FOLDERS = {"DumpVars"}
 
 LUA_STD_LIBS = {
     "string", "table", "math", "pairs", "ipairs", "next", "select", "unpack",

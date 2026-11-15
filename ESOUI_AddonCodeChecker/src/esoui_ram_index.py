@@ -19,6 +19,7 @@ from src.esoui_config import (
     ESO_EXTRA_GLOBALS_FILE,
     ESO_LIVE_SOURCE_DIR,
     ESO_UNDOCUMENTED_GLOBALS_FILE,
+    EXCLUDED_DEPENDENCY_ADDON_FOLDERS,
     resolve_config_file_path,
 )
 
@@ -311,14 +312,18 @@ def build_esoui_index_once():
                             for v_ctrl, line_no in extract_virtual_controls_from_lua(full_content):
                                 if v_ctrl not in ESOUI_RAM_DICTIONARY:
                                     ESOUI_RAM_DICTIONARY[v_ctrl] = f"ESOUI Virtual Control ({rel_display}:{line_no})"
-                            # Exact ZO_MenuBar button count per file: count ZO_MenuBar_AddButton(...) calls for referenced ZO_*MenuBar controls
-                            add_btn_calls = len(re.findall(r'\bZO_MenuBar_AddButton\s*\(', full_content))
-                            if add_btn_calls > 0:
-                                for mb_name in set(re.findall(r'\b(ZO_[A-Za-z0-9_]+MenuBar)\b', full_content)):
-                                    for btn_idx in range(1, add_btn_calls + 1):
+                            # Count MenuBar buttons per file via ZO_MenuBar_AddButton(...) or descriptor = entries for referenced ZO_*MenuBar controls
+                            mb_controls = set(re.findall(r'\b(ZO_[A-Za-z0-9_]+MenuBar)\b', full_content))
+                            if mb_controls:
+                                add_btn_calls = len(re.findall(r'\bZO_MenuBar_AddButton\s*\(', full_content))
+                                descriptor_entries = len(re.findall(r'\bdescriptor\s*=', full_content))
+                                btn_count = max(add_btn_calls, descriptor_entries, 4)
+                                for mb_name in mb_controls:
+                                    for btn_idx in range(1, btn_count + 1):
                                         btn_name = f"{mb_name}Button{btn_idx}"
                                         if btn_name not in ESOUI_RAM_DICTIONARY:
                                             ESOUI_RAM_DICTIONARY[btn_name] = f"ESOUI MenuBar Button ({rel_display})"
+
 
                             # Catch dynamic CreateControlFromVirtual("Prefix", parent, "Tpl", i) -> Prefix1..Prefix10
                             for dyn_m in re.finditer(
@@ -377,6 +382,15 @@ def build_esoui_index_once():
 
 def is_index_built():
     return ESOUI_INDEX_BUILT
+
+
+def reset_dependency_globals_cache():
+    """Clears the in-memory dependency & local AddOns globals cache."""
+    global DEPENDENCY_DISK_CACHE_LOADED, LOCAL_ADDONS_MANIFEST_INDEX
+    DEPENDENCY_GLOBALS_CACHE.clear()
+    DEPENDENCY_DISK_CACHE_LOADED = False
+    LOCAL_ADDONS_MANIFEST_INDEX = None
+
 
 
 def get_current_api_version():
@@ -445,10 +459,14 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                     except Exception:
                         pass
 
+    excluded_folders_lower = {f.strip().lower() for f in EXCLUDED_DEPENDENCY_ADDON_FOLDERS if f and f.strip()}
+
     if LOCAL_ADDONS_MANIFEST_INDEX is None:
         idx_map = {}
         try:
             for entry_name in os.listdir(ESO_ADDONS_DIR):
+                if entry_name.lower() in excluded_folders_lower:
+                    continue
                 full_entry = os.path.join(ESO_ADDONS_DIR, entry_name)
                 if not os.path.isdir(full_entry):
                     continue
@@ -499,9 +517,15 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
     _load_dependency_disk_cache()
     all_dep_globals = {}
     cache_dirty = False
+    scan_start_time = datetime.now()
     spinner_frames = ("|", "/", "-", "\\")
     spinner_idx = 0
     scanned_any_file = False
+    scanned_folders_count = 0
+    scanned_txt_manifests_count = 0
+    scanned_addon_manifests_count = 0
+    scanned_lua_count = 0
+    scanned_xml_count = 0
     term_cols = shutil.get_terminal_size((100, 20)).columns
 
     def _update_scan_spinner(rel_file_display):
@@ -516,7 +540,8 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
         sys.stdout.flush()
 
     def _get_or_scan_addon_folder(folder_label, folder_path):
-        nonlocal cache_dirty
+        nonlocal cache_dirty, scanned_folders_count, scanned_txt_manifests_count, scanned_addon_manifests_count, scanned_lua_count, scanned_xml_count
+
         current_hash = _compute_dir_fingerprint(folder_path)
 
         cached_entry = DEPENDENCY_GLOBALS_CACHE.get(folder_label)
@@ -550,8 +575,16 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                         except Exception:
                             pass
 
+        if os.path.isdir(folder_path):
+            scanned_folders_count += 1
+
         if manifest_path:
             manifest_basename = os.path.basename(manifest_path)
+            if manifest_basename.lower().endswith(".addon"):
+                scanned_addon_manifests_count += 1
+            else:
+                scanned_txt_manifests_count += 1
+
             try:
                 with open(manifest_path, 'r', encoding='utf-8', errors='ignore') as mf:
                     for m_line_no, raw_line in enumerate(mf, 1):
@@ -581,6 +614,7 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                                 file_text = tf.read()
 
                             if target_file.lower().endswith('.lua'):
+                                scanned_lua_count += 1
                                 dep_globals.update(extract_lua_globals_fn(file_text, rel_display))
                                 for v_ctrl, line_no in extract_virtual_controls_from_lua(file_text):
                                     if v_ctrl not in dep_globals:
@@ -600,6 +634,7 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                                             line_no = no_comments.count('\n', 0, km.start(1)) + 1
                                             dep_globals[k_ident] = f"{rel_display}:{line_no}"
                             elif target_file.lower().endswith('.xml'):
+                                scanned_xml_count += 1
                                 for g_name, line_no in extract_resolved_xml_control_names(file_text):
                                     if g_name not in dep_globals:
                                         dep_globals[g_name] = f"{rel_display}:{line_no}"
@@ -615,9 +650,11 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
         return dep_globals
 
     # 1. Scan declared & reverse dependencies first (highest priority)
-    scanned_lowers = set(checked_addon_names)
+    scanned_lowers = set(checked_addon_names) | excluded_folders_lower
     for dep in dep_names:
         low_d = dep.lower()
+        if low_d in excluded_folders_lower:
+            continue
         scanned_lowers.add(low_d)
         if low_d in LOCAL_ADDONS_MANIFEST_INDEX:
             orig_name, dep_dir, _ = LOCAL_ADDONS_MANIFEST_INDEX[low_d]
@@ -636,8 +673,17 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                 all_dep_globals[g_key] = f"{g_loc} (installed addon)"
 
     if scanned_any_file:
-        sys.stdout.write(f"\r\033[K    │     {C.GREEN}✔{C.RESET} Dependency & AddOns scan complete.\n")
+        scan_elapsed = (datetime.now() - scan_start_time).total_seconds()
+        sys.stdout.write(
+            f"\r\033[K    │     {C.GREEN}✔{C.RESET} Dependency & AddOns scan completed in {C.MAGENTA}{scan_elapsed:.2f}{C.RESET} seconds.\n"
+            f"    │       {C.CYAN}Scanned {C.WHITE}{scanned_folders_count}{C.CYAN} add-on folder(s): "
+            f"{C.WHITE}{scanned_txt_manifests_count}{C.CYAN} .txt, "
+            f"{C.WHITE}{scanned_addon_manifests_count}{C.CYAN} .addon, "
+            f"{C.WHITE}{scanned_lua_count}{C.CYAN} .lua, "
+            f"{C.WHITE}{scanned_xml_count}{C.CYAN} .xml.{C.RESET}\n"
+        )
         sys.stdout.flush()
+
 
     if cache_dirty:
         _save_dependency_disk_cache()

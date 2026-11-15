@@ -342,9 +342,9 @@ def handle_clear_command(arg_str):
         return
 
     parts = raw_args.split()
-    target_type = parts.lower()
+    target_type = parts[0].lower()
     if target_type not in ("cache", "zips", "reports"):
-        print(f"{C.RED}-> Error: Unknown 'clear' target '{parts}'. Allowed targets: cache, zips, reports.{C.RESET}")
+        print(f"{C.RED}-> Error: Unknown 'clear' target '{parts[0]}'. Allowed targets: cache, zips, reports.{C.RESET}")
         return
     if target_type == "cache" and len(parts) > 1:
         print(f"{C.RED}-> Error: 'clear cache' does not accept a date parameter.{C.RESET}")
@@ -355,7 +355,8 @@ def handle_clear_command(arg_str):
 
     cutoff_date_str = None
     if len(parts) == 2:
-        cutoff_date_str = parts
+        cutoff_date_str = parts[1]
+
         if not re.match(r'^\d{6}$', cutoff_date_str):
             print(f"{C.RED}-> Error: Invalid date '{cutoff_date_str}'. Expected 6-digit YYMMDD format.{C.RESET}")
             return
@@ -376,9 +377,11 @@ def handle_clear_command(arg_str):
                     for dn in dirs:
                         dirs_to_delete.append(os.path.join(root, dn))
                 dirs_to_delete.append(pycache_dir)
-        filelist_cache = os.path.join("Cache", "filelist.json")
-        if os.path.isfile(filelist_cache):
-            files_to_delete.append(os.path.abspath(filelist_cache))
+        for cache_fn in ("filelist.json", "dependency_globals_cache.json"):
+            cache_file = os.path.join("Cache", cache_fn)
+            if os.path.isfile(cache_file):
+                files_to_delete.append(os.path.abspath(cache_file))
+
     else:
         base_target_dir = ZIP_FOLDER if target_type == "zips" else REPORTS_BASE_DIR
         if os.path.isdir(base_target_dir):
@@ -431,7 +434,15 @@ def handle_clear_command(arg_str):
         except Exception as e:
             print(f"  {C.YELLOW}[ERROR FOLDER]{C.RESET}   {d_path} ({e})")
 
+    if target_type == "cache":
+        try:
+            from src.esoui_ram_index import reset_dependency_globals_cache
+            reset_dependency_globals_cache()
+        except Exception:
+            pass
+
     print(
         f"{C.GREEN}-> Cleanup finished: deleted {C.WHITE}{deleted_files}{C.GREEN} file(s) "
         f"and {C.WHITE}{deleted_dirs}{C.GREEN} folder(s).{C.RESET}\n"
     )
+
