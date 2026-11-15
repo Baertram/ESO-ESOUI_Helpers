@@ -280,21 +280,25 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
             f"(ID: {clickable_id} | v{version_text} | by {author_text} | API: {api_val})"
         )
 
-    sel_input = auto_select_spec if auto_select_spec is not None else read_cli_input_with_esc(
-        "\nSelect result number(s) to check (e.g. '1', '1-3', '2, 5', 'all', or Enter/ESC to cancel): "
-    ).strip()
+    while True:
+        sel_input = auto_select_spec if auto_select_spec is not None else read_cli_input_with_esc(
+            "\nSelect result number(s) to check (e.g. '1', '1-3', '2, 5', 'all', or Enter/ESC to cancel): "
+        ).strip()
 
-    if not sel_input or sel_input == "__ESC__" or sel_input.lower() in ("cancel", "exit", "0"):
-        print(f"{C.CYAN}-> Search selection cancelled.{C.RESET}\n")
-        return
+        if not sel_input or sel_input == "__ESC__" or sel_input.lower() in ("cancel", "exit", "0"):
+            print(f"{C.CYAN}-> Search selection cancelled.{C.RESET}\n")
+            return
 
-    if sel_input.lower() == "all":
-        sel_input = f"1-{len(hits)}"
+        if sel_input.lower() == "all":
+            sel_input = f"1-{len(hits)}"
 
-    selected_ranks, err_msg = parse_last_selection_spec(sel_input, len(hits))
-    if err_msg:
-        print(f"{C.RED}-> Error: {err_msg}{C.RESET}\n")
-        return
+        selected_ranks, err_msg = parse_last_selection_spec(sel_input, len(hits))
+        if err_msg:
+            print(f"{C.RED}-> Error: {err_msg}{C.RESET}")
+            if auto_select_spec is not None:
+                return
+            continue
+        break
 
     selected_entries = [(rank, hits[rank - 1]) for rank in selected_ranks]
     _process_addon_entries_in_chunks(

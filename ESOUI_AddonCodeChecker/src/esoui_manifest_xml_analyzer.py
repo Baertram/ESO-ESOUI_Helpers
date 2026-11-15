@@ -102,6 +102,10 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
         line_str = line.strip()
         if not line_str.startswith("##"):
             continue
+        if re.match(r'^##\s*SavedVariablesPerCharacter\s*:', line_str, flags=re.IGNORECASE):
+            manifest_issues.append(
+                f"Non supported SavedVariable definition (line {line_num}): Use '## SavedVariables:' instead (-- {line_str})."
+            )
         if ":" in line_str:
             left_part, _ = line_str.split(":", 1)
             if left_part.endswith(" "):
@@ -230,7 +234,7 @@ def _extract_xml_inline_lua_leaks(content, addon_ctx):
 
 
 def analyze_xml_file(file_name, content, addon_ctx):
-    is_bindings = (os.path.basename(file_name) == "Bindings.xml")
+    is_bindings = (os.path.basename(file_name).lower() == "bindings.xml")
     schema_setting = ESO_BINDINGS_SCHEMA_FILE if is_bindings else ESO_XML_SCHEMA_FILE
     xml_issues = []
 

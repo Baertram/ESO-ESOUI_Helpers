@@ -21,6 +21,8 @@ from src.esoui_ram_index import (
     ESOUI_UNDOCUMENTED_SET,
     build_esoui_index_once,
     collect_dependency_globals,
+    extract_resolved_xml_control_names,
+    extract_virtual_controls_from_lua,
     get_current_api_version,
     is_index_built,
 )
@@ -178,13 +180,15 @@ def collect_addon_context(extract_dir):
             for f in files:
                 lower_f = f.lower()
                 full_path = os.path.join(root, f)
-                if f == "Bindings.xml":
+                if f.lower() == "bindings.xml":
                     has_bindings_xml = True
                 if lower_f.endswith(".xml"):
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as xf:
                             raw_xml = xf.read()
                         xml_combined_parts.append(re.sub(r'<!--.*?-->', '', raw_xml, flags=re.DOTALL))
+                        for ctrl_name, _ in extract_resolved_xml_control_names(raw_xml):
+                            dynamic_globals.add(ctrl_name)
                     except Exception:
                         pass
                 elif lower_f.endswith(".lua"):
@@ -200,13 +204,16 @@ def collect_addon_context(extract_dir):
                         for m in tbl_matches:
                             if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', lua_clean):
                                 all_global_tables.add(m)
-                        # Register all top-level globals & dynamic _G[var] constants defined by the addon itself
+                        # Register all top-level globals, dynamic _G[var] constants & CreateControlFromVirtual controls
                         rel_f = os.path.relpath(full_path, extract_dir).replace("\\", "/")
                         file_defined_globals = extract_globals_from_lua_source(raw_lua_txt, rel_f)
                         dynamic_globals.update(file_defined_globals.keys())
+                        for v_ctrl, _ in extract_virtual_controls_from_lua(raw_lua_txt):
+                            dynamic_globals.add(v_ctrl)
 
                     except Exception:
                         pass
+
         for m_file in root_addon_manifests + root_txt_manifests:
             m_path = os.path.join(manifest_root_dir, m_file)
             try:
@@ -755,6 +762,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
             print(f"    ├── {C.CYAN}Potential AI code hints added to report{C.RESET}")
         print(f"    └── {C.GREEN}[PASS]{C.RESET} Static check passed.")
         return "[STATUS] PASS" + ai_slop_block
+
 
     unverified_identifiers.sort()
     print(f"    └── {C.BLUE}[QUEUE FOR AI]{C.RESET} {C.CYAN}Unverified globals: {', '.join(unverified_identifiers[:15])}{C.RESET}")
