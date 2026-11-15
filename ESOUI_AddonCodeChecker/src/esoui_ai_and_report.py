@@ -32,6 +32,7 @@ from src.esoui_config import (
     ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
     ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX,
     ESOUI_BATCH_CHUNK_SIZE,
+    ESOUI_COMMENT_MAX_CHARS,
     ESOUI_LATEST_MAX_ITEMS,
     ESOUI_UPLOAD_RULES_URL,
     EXTRACT_FOLDER,
@@ -332,14 +333,24 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
 
     def _walk(sub_tree, parent_path=""):
         items = sorted(sub_tree.items(), key=lambda kv: (kv[-1] is None, next(iter(kv)).lower()))
+        dds_shown = 0
+        dds_truncated = False
         for name, child in items:
             curr_path = f"{parent_path}/{name}" if parent_path else name
-            display_name = f"{name}/" if child is not None else name
-            if child is None and curr_path in manifest_norm:
-                display_name = f"{display_name} {lb}MANIFEST{rb}"
             is_bad = (curr_path in flagged_norm) or any(
                 curr_path.startswith(fp + "/") for fp in flagged_norm
             )
+            if child is None and name.lower().endswith(".dds") and not is_bad:
+                dds_shown += 1
+                if dds_shown > 5:
+                    if not dds_truncated:
+                        out_lines.append(f"{lb}*{rb} ... other dds textures")
+                        dds_truncated = True
+                    continue
+
+            display_name = f"{name}/" if child is not None else name
+            if child is None and curr_path in manifest_norm:
+                display_name = f"{display_name} {lb}MANIFEST{rb}"
             if is_bad:
                 out_lines.append(f'{lb}*{rb} {lb}color="Red"{rb}:mad: {display_name}{lb}/color{rb}')
             else:
@@ -348,7 +359,6 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
                 out_lines.append(f"{lb}list{rb}")
                 _walk(child, curr_path)
                 out_lines.append(f"{lb}/list{rb}")
-
     _walk(tree)
     out_lines.append(f"{lb}/list{rb}{lb}/SIZE{rb}")
     return "\n".join(out_lines)
@@ -753,6 +763,20 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 )
                 continue
 
+            pollution_m = re.match(
+                r"^Global Variable Pollution\s*\(missing 'local' for '([^']+)'\)\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if pollution_m:
+                var_name = pollution_m.group(1).strip()
+                line_no = int(pollution_m.group(2))
+                raw_code = pollution_m.group(3).strip()
+                code_comment = re.sub(r'^--\s*', '', raw_code)
+                report_data.setdefault("global_var_pollution", []).append(
+                    (rel_norm, line_no, var_name, code_comment)
+                )
+                continue
+
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
             code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
@@ -764,7 +788,6 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
             else:
                 rule_title = next(iter(rule_title.split(":", 1))).strip()
             report_data["critical"][category][rule_title].append((rel_norm, line_no, code_comment))
-
 
         elif section == "bp":
             if s.startswith("- "):
@@ -812,8 +835,8 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                     report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
 
 
-def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
-    """Writes the compact, grouped ESOUI BBCode report without any PASS noise."""
+def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=False):
+    """Builds the ESOUI BBCode report text; when compact_bp=True, collapses repeated Best Practice lines."""
     lb, rb = chr(91), chr(93)
     out = [
         "Welcome. Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:",
@@ -829,10 +852,26 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
     ]
 
     if report_data.get("zip_tree_bbcode"):
-        out.append(report_data["zip_tree_bbcode"])
+        tree_bb = report_data["zip_tree_bbcode"]
+        pollution_files = {
+            os.path.basename(fp.replace("\\", "/"))
+            for fp, _, _, _ in (report_data.get("global_var_pollution") or [])
+        }
+        for leaf_name in pollution_files:
+            plain_leaf = f"{chr(91)}*{chr(93)} {leaf_name}"
+            flagged_leaf = f'{chr(91)}*{chr(93)} {chr(91)}color="Red"{chr(93)}:mad: {leaf_name}{chr(91)}/color{chr(93)}'
+            if plain_leaf in tree_bb:
+                tree_bb = tree_bb.replace(plain_leaf, flagged_leaf)
+        out.append(tree_bb)
+
 
     unverified_entries = report_data.get("unverified_globals") or []
-    has_crit = bool(report_data["zip_violations"]) or any(bool(v) for v in report_data["critical"].values())
+    pollution_entries = report_data.get("global_var_pollution") or []
+    has_crit = (
+        bool(report_data["zip_violations"])
+        or bool(pollution_entries)
+        or any(bool(v) for v in report_data["critical"].values())
+    )
     has_unverified = bool(unverified_entries)
     has_bp = bool(report_data["best_practices"]) or bool(report_data.get("bp_grouped_globals"))
 
@@ -847,11 +886,27 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
             out.append(f"{lb}/list{rb}")
 
         for cat_key, cat_label in (("manifest", "Manifest (.addon / .txt)"), ("lua", "Lua Files"), ("xml", "XML Files")):
-            rules_map = report_data["critical"].get(cat_key)
-            if not rules_map:
+            rules_map = report_data["critical"].get(cat_key) or {}
+            has_cat_pollution = (cat_key == "lua" and bool(pollution_entries))
+            if not rules_map and not has_cat_pollution:
                 continue
             out.append("")
             out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
+
+            if has_cat_pollution:
+                out.append(f"{lb}u{rb}{lb}b{rb}Global Variable Pollution{lb}/b{rb}{lb}/u{rb}")
+                out.append("Missing local definition? Else: Please define only 1 global table for your addon, and add all relevant functions/tables/controls/variables to it")
+                by_file = defaultdict(list)
+                for f_path, ln_no, var_name, code_txt in pollution_entries:
+                    by_file[f_path].append((int(ln_no), var_name, code_txt))
+                spoiler_lines = []
+                for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
+                    spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
+                    for ln_no, var_name, code_txt in sorted(by_file[f_path], key=lambda item: item[0]):
+                        spoiler_lines.append(f"  {ln_no}: {var_name} ({code_txt})")
+                spoiler_body = "\n".join(spoiler_lines)
+                out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
+
             for rule_title, entries in rules_map.items():
                 out.append(f"{lb}u{rb}{rule_title}{lb}/u{rb}")
                 out.append(f"{lb}list{rb}")
@@ -869,7 +924,6 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                         spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
                         out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
-
 
     if has_unverified:
         out.append("")
@@ -909,8 +963,15 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                 spoiler_lines = []
                 for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
                     spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
-                    for ln_no, code_txt in files_map[f_path]:
-                        spoiler_lines.append(f"  {ln_no}: {code_txt}")
+                    hits_list = files_map[f_path]
+                    if compact_bp and len(hits_list) > 1:
+                        first_ln, first_code = hits_list[0]
+                        spoiler_lines.append(f"  {first_ln}: {first_code}")
+                        extra_lns = ", ".join(str(ln) for ln, _ in hits_list[1:])
+                        spoiler_lines.append(f"  Lines: {extra_lns}")
+                    else:
+                        for ln_no, code_txt in hits_list:
+                            spoiler_lines.append(f"  {ln_no}: {code_txt}")
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(
                     f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
@@ -924,18 +985,44 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
             out.append("")
             out.append(f"{lb}u{rb}{bp_rule}{lb}/u{rb}")
             out.append(f"{lb}list{rb}")
-            for f_path, ln_no, code_txt in entries:
-                loc = f"{f_path}:{ln_no}" if ln_no else f_path
-                spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
-                out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+            if compact_bp and len(entries) > 1:
+                by_file = defaultdict(list)
+                for f_path, ln_no, code_txt in entries:
+                    by_file[f_path].append((ln_no, code_txt))
+                for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
+                    f_hits = by_file[f_path]
+                    first_ln, first_code = f_hits[0]
+                    loc = f"{f_path}:{first_ln}" if first_ln else f_path
+                    if len(f_hits) > 1:
+                        extra_lns = ", ".join(str(ln) for ln, _ in f_hits[1:] if ln)
+                        spoiler_body = f"{first_code}\nLines: {extra_lns}" if first_code else f"Lines: {extra_lns}"
+                    else:
+                        spoiler_body = first_code
+                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}' if spoiler_body else ""
+                    out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+            else:
+                for f_path, ln_no, code_txt in entries:
+                    loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                    out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             out.append(f"{lb}/list{rb}")
 
     if not has_crit and not has_unverified and not has_bp:
         out.append("")
         out.append(f'{lb}color="Green"{rb}No critical violations or best practice issues found.{lb}/color{rb}')
 
+    return "\n".join(out).strip() + "\n"
+
+
+def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
+    """Writes the compact, grouped ESOUI BBCode report, auto-compacting Best Practices if over ESOUI_COMMENT_MAX_CHARS."""
+    rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=False)
+    if len(rendered) > ESOUI_COMMENT_MAX_CHARS:
+        rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=True)
+
     with open(report_file_path, "w", encoding="utf-8") as wf:
-        wf.write("\n".join(out).strip() + "\n")
+        wf.write(rendered)
+
 def process_addon(zip_path, zip_name):
     """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
     addon_start_time = datetime.now()
@@ -1056,6 +1143,8 @@ def process_addon(zip_path, zip_name):
             _parse_findings_into_report_data(bp_file, "lua", "[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(f"  - {s}" for s in suggs), report_data)
 
     all_flagged = set(report_data.get("zip_flagged_paths", set()))
+    for f_path, _, _, _ in report_data.get("global_var_pollution") or []:
+        all_flagged.add(f_path)
     for cat_rules in report_data["critical"].values():
         for entries in cat_rules.values():
             for f_path, _, _ in entries:

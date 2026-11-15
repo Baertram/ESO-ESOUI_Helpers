@@ -55,6 +55,9 @@ ESO_ADDONS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Elder Scrol
 ALLOWED_DOWNLOAD_DOMAINS = {"esoui.com", "://esoui.com", "mmoui.com"}
 ESOUI_LATEST_MAX_ITEMS = 200
 ESOUI_BATCH_CHUNK_SIZE = 10
+# Safe character limit for a single ESOUI / MMOUI vBulletin add-on comment
+ESOUI_COMMENT_MAX_CHARS = 9999
+
 
 _ESOUI_BASE = "https://" + "www.esoui.com"
 _ESOUI_WIKI_BASE = "https://" + "wiki.esoui.com"

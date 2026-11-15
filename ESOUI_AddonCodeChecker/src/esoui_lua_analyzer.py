@@ -21,7 +21,6 @@ from src.esoui_config import (
 )
 
 from src.esoui_ram_index import (
-    ESOUI_EVENT_HAS_GAMEPAD_MODE,
     ESOUI_EVENT_HAS_UNIT_TAG,
     ESOUI_EVENT_PARAM_TYPES,
     ESOUI_RAM_DICTIONARY,
@@ -166,11 +165,12 @@ def _parse_wiki_event_filter_html(html_text):
         if not f_match:
             continue
         filter_const = f_match.group(1)
-        if filter_const == "REGISTER_FILTER_INVALID":
+        if filter_const in ("REGISTER_FILTER_INVALID", "REGISTER_FILTER_IS_IN_GAMEPAD_PREFERRED_MODE"):
             continue
         for ev_name in re.findall(r"\b(EVENT_[A-Z0-9_]+)\b", col2):
             parsed[ev_name].add(filter_const)
     return {ev: sorted(flts) for ev, flts in parsed.items()}
+
 
 
 def _sync_wiki_event_filters_once():
@@ -602,12 +602,8 @@ def _get_event_filter_spec(event_name):
             {"REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX"},
             "Use event filters for unit tags instead of checking code slower in lua",
         )
-    if event_name in ESOUI_EVENT_HAS_GAMEPAD_MODE:
-        return (
-            {"REGISTER_FILTER_IS_IN_GAMEPAD_PREFERRED_MODE"},
-            "Use event filters for gamepad preferred mode instead of checking code slower in lua",
-        )
     return None, None
+
 
 
 def _check_lua_event_filters(content, raw_lines, lua_issues):
