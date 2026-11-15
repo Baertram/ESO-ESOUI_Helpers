@@ -739,6 +739,20 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
 
         if section == "crit" and s.startswith("- "):
             item_text = s[2:].strip()
+            ev_filter_m = re.match(
+                r'^(Use event filters for [^:]+):\s*(EVENT_[A-Z0-9_]+)\s*\(line\s+(\d+)\)\s*\((.+)\)\s*$',
+                item_text,
+            )
+            if ev_filter_m:
+                rule_title = ev_filter_m.group(1).strip()
+                ev_name = ev_filter_m.group(2).strip()
+                line_no = ev_filter_m.group(3).strip()
+                snippet_txt = ev_filter_m.group(4).strip()
+                report_data["critical"][category][rule_title].append(
+                    (f"EVENT_FILTER::{ev_name}::{rel_norm}", line_no, snippet_txt)
+                )
+                continue
+
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
             code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
@@ -750,6 +764,7 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
             else:
                 rule_title = next(iter(rule_title.split(":", 1))).strip()
             report_data["critical"][category][rule_title].append((rel_norm, line_no, code_comment))
+
 
         elif section == "bp":
             if s.startswith("- "):
@@ -841,10 +856,20 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                 out.append(f"{lb}u{rb}{rule_title}{lb}/u{rb}")
                 out.append(f"{lb}list{rb}")
                 for f_path, ln_no, code_txt in entries:
-                    loc = f"{f_path}:{ln_no}" if ln_no else f_path
-                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
-                    out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+                    if f_path.startswith("EVENT_FILTER::"):
+                        _, ev_name, real_file = f_path.split("::", 2)
+                        header_loc = f"{real_file}:{ln_no}" if ln_no else real_file
+                        spoiler_body = f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}\n{code_txt}"
+                        out.append(
+                            f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
+                            f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                        )
+                    else:
+                        loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                        spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                        out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
+
 
     if has_unverified:
         out.append("")
@@ -1034,7 +1059,10 @@ def process_addon(zip_path, zip_name):
     for cat_rules in report_data["critical"].values():
         for entries in cat_rules.values():
             for f_path, _, _ in entries:
-                all_flagged.add(f_path)
+                if f_path.startswith("EVENT_FILTER::"):
+                    all_flagged.add(f_path.split("::", 2)[2])
+                else:
+                    all_flagged.add(f_path)
     if report_data.get("zip_all_entries"):
         report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(
             report_data["zip_all_entries"],

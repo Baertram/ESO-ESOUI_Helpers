@@ -2,13 +2,16 @@
 Statische Python-Codeanalyse für ESO Lua-, Manifest- (.addon/.txt) und XML-Dateien.
 """
 
+import json
 import os
 import re
+import urllib.request
 from collections import defaultdict
 from datetime import datetime
 
 from src.esoui_config import (
     C,
+    ESOUI_WIKI_EVENT_FILTERS_URL,
     ESO_BINDINGS_SCHEMA_FILE,
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
@@ -16,7 +19,11 @@ from src.esoui_config import (
     print_wrapped_tree_item,
     resolve_config_file_path,
 )
+
 from src.esoui_ram_index import (
+    ESOUI_EVENT_HAS_GAMEPAD_MODE,
+    ESOUI_EVENT_HAS_UNIT_TAG,
+    ESOUI_EVENT_PARAM_TYPES,
     ESOUI_RAM_DICTIONARY,
     ESOUI_UNDOCUMENTED_SET,
     build_esoui_index_once,
@@ -40,6 +47,181 @@ XML_SCHEMA_WARNED = set()
 BATCH_LEAK_TRACKER = defaultdict(list)
 BATCH_BEST_PRACTICE_TRACKER = defaultdict(list)
 
+WIKI_EVENT_FILTERS_CACHE_FILE = os.path.join("Cache", "wiki_event_filters_cache.json")
+_WIKI_EVENT_FILTER_SESSION_LOADED = False
+_WIKI_DYNAMIC_EVENT_RULES = {}
+
+# ==============================================================================
+# WARTUNGSHINWEIS / HOW TO ADD NEW ESO EVENT FILTERS
+# ==============================================================================
+# 1. AUTOMATISCHER WIKI-SYNC (1x pro Session):
+#    Beim ersten Lua-Check einer Session ruft `_sync_wiki_event_filters_once()`
+#    einmalig `ESOUI_WIKI_EVENT_FILTERS_URL` (aus `src/esoui_config.py`) ab,
+#    parst die Tabelle `Filter Types` (Spalte 1: REGISTER_FILTER_*, Spalte 2:
+#    EVENT_*) und merkt sich neue Zuordnungen für die gesamte Session (sowie
+#    als Backup in `Cache/wiki_event_filters_cache.json` für Offline-Läufe).
+#
+# 2. MANUELLE ERGÄNZUNG (Fallback & präzise Callback-Parameter-Prüfung):
+#    Falls ein neues Event im Wiki noch nicht dokumentiert ist oder du eine
+#    eigene BBCode-Überschrift (`rule_title`) festlegen möchtest:
+#    a) Trage das Event in `EVENT_FILTER_RULES` ein:
+#       "<EVENT_NAME>": {
+#           "filters": {"<REGISTER_FILTER_1>", "<REGISTER_FILTER_2>"},
+#           "rule_title": "Use event filters for <thema> instead of checking code slower in lua",
+#       }
+#    b) Falls geprüft werden soll, ob der Callback denselben Parameter trotz
+#       aktivem Filter noch einmal per `if param == ...` im Lua-Code prüft:
+#       Trage in `FILTER_TYPE_PARAM_INDEX` das Tupel
+#       ("<EVENT_NAME>", "<REGISTER_FILTER_X>"): <1-basierter Parameter-Index>
+#       ein. Den exakten Index findest du in `ESOUIDocumentation.txt` bei der
+#       Signatur des Events (Parameter 1 nach `eventCode` = Index 1, z. B. bei
+#       `EVENT_INVENTORY_SINGLE_SLOT_UPDATE(eventCode, bagId, slotIndex, ...)`
+#       ist `bagId` = 1, `isNewItem` = 3, `inventoryUpdateReason` = 5).
+#    c) Hinweis zu generischen Wiki-Regeln:
+#       - "Any event with a unitTag argument" -> wird automatisch über
+#         `ESOUI_EVENT_HAS_UNIT_TAG` aus `ESOUIDocumentation.txt` erkannt.
+#       - "Any" (`REGISTER_FILTER_IS_IN_GAMEPAD_PREFERRED_MODE`) -> wird über
+#         `ESOUI_EVENT_HAS_GAMEPAD_MODE` aus `ESOUIDocumentation.txt` erkannt.
+# ==============================================================================
+EVENT_FILTER_RULES = {
+    "EVENT_ABILITY_COOLDOWN_UPDATED": {
+        "filters": {"REGISTER_FILTER_ABILITY_ID"},
+        "rule_title": "Use event filters for ability cooldowns instead of checking code slower in lua",
+    },
+    "EVENT_COMBAT_EVENT": {
+        "filters": {
+            "REGISTER_FILTER_ABILITY_ID",
+            "REGISTER_FILTER_COMBAT_RESULT",
+            "REGISTER_FILTER_IS_ERROR",
+            "REGISTER_FILTER_POWER_TYPE",
+            "REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE",
+            "REGISTER_FILTER_TARGET_COMBAT_UNIT_TYPE",
+            "REGISTER_FILTER_VIBRATION_FILTER",
+        },
+        "rule_title": "Use event filters for combat instead of checking code slower in lua",
+    },
+    "EVENT_EFFECT_CHANGED": {
+        "filters": {
+            "REGISTER_FILTER_ABILITY_ID",
+            "REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE",
+            "REGISTER_FILTER_UNIT_TAG",
+            "REGISTER_FILTER_UNIT_TAG_PREFIX",
+        },
+        "rule_title": "Use event filters for effect changes instead of checking code slower in lua",
+    },
+    "EVENT_INVENTORY_SINGLE_SLOT_UPDATE": {
+        "filters": {
+            "REGISTER_FILTER_BAG_ID",
+            "REGISTER_FILTER_INVENTORY_UPDATE_REASON",
+            "REGISTER_FILTER_IS_NEW_ITEM",
+        },
+        "rule_title": "Use event filters for inventory items instead of checking code slower in lua",
+    },
+    "EVENT_POWER_UPDATE": {
+        "filters": {
+            "REGISTER_FILTER_POWER_TYPE",
+            "REGISTER_FILTER_UNIT_TAG",
+            "REGISTER_FILTER_UNIT_TAG_PREFIX",
+        },
+        "rule_title": "Use event filters for power updates instead of checking code slower in lua",
+    },
+    "EVENT_INTERFACE_SETTING_CHANGED": {
+        "filters": {"REGISTER_FILTER_SETTING_SYSTEM_TYPE"},
+        "rule_title": "Use event filters for interface settings instead of checking code slower in lua",
+    },
+}
+
+FILTER_TYPE_PARAM_INDEX = {
+    ("EVENT_INVENTORY_SINGLE_SLOT_UPDATE", "REGISTER_FILTER_BAG_ID"): 1,
+    ("EVENT_INVENTORY_SINGLE_SLOT_UPDATE", "REGISTER_FILTER_IS_NEW_ITEM"): 3,
+    ("EVENT_INVENTORY_SINGLE_SLOT_UPDATE", "REGISTER_FILTER_INVENTORY_UPDATE_REASON"): 5,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_COMBAT_RESULT"): 1,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_IS_ERROR"): 2,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_POWER_TYPE"): 11,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE"): 8,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_TARGET_COMBAT_UNIT_TYPE"): 10,
+    ("EVENT_COMBAT_EVENT", "REGISTER_FILTER_ABILITY_ID"): 16,
+    ("EVENT_EFFECT_CHANGED", "REGISTER_FILTER_UNIT_TAG"): 6,
+    ("EVENT_EFFECT_CHANGED", "REGISTER_FILTER_UNIT_TAG_PREFIX"): 6,
+    ("EVENT_EFFECT_CHANGED", "REGISTER_FILTER_SOURCE_COMBAT_UNIT_TYPE"): 13,
+    ("EVENT_EFFECT_CHANGED", "REGISTER_FILTER_ABILITY_ID"): 15,
+    ("EVENT_POWER_UPDATE", "REGISTER_FILTER_UNIT_TAG"): 1,
+    ("EVENT_POWER_UPDATE", "REGISTER_FILTER_UNIT_TAG_PREFIX"): 1,
+    ("EVENT_POWER_UPDATE", "REGISTER_FILTER_POWER_TYPE"): 3,
+    ("EVENT_ABILITY_COOLDOWN_UPDATED", "REGISTER_FILTER_ABILITY_ID"): 1,
+    ("EVENT_INTERFACE_SETTING_CHANGED", "REGISTER_FILTER_SETTING_SYSTEM_TYPE"): 1,
+}
+
+
+def _parse_wiki_event_filter_html(html_text):
+    """Parst REGISTER_FILTER_* -> EVENT_* Zuordnungen aus der ESOUI-Wiki-Tabelle."""
+    parsed = defaultdict(set)
+    for row_html in re.findall(r"<tr\b[^>]*>(.*?)</tr>", html_text, flags=re.DOTALL | re.IGNORECASE):
+        cells = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row_html, flags=re.DOTALL | re.IGNORECASE)
+        if len(cells) < 2:
+            continue
+        col1 = re.sub(r"<[^>]+>", " ", cells[0]).strip()
+        col2 = re.sub(r"<[^>]+>", " ", cells[1]).strip()
+        f_match = re.search(r"\b(REGISTER_FILTER_[A-Z0-9_]+)\b", col1)
+        if not f_match:
+            continue
+        filter_const = f_match.group(1)
+        if filter_const == "REGISTER_FILTER_INVALID":
+            continue
+        for ev_name in re.findall(r"\b(EVENT_[A-Z0-9_]+)\b", col2):
+            parsed[ev_name].add(filter_const)
+    return {ev: sorted(flts) for ev, flts in parsed.items()}
+
+
+def _sync_wiki_event_filters_once():
+    """Lädt die ESOUI-Wiki-Filtertabelle 1x pro Session (mit lokalem Disk-Fallback)."""
+    global _WIKI_EVENT_FILTER_SESSION_LOADED
+    if _WIKI_EVENT_FILTER_SESSION_LOADED:
+        return
+    _WIKI_EVENT_FILTER_SESSION_LOADED = True
+
+    fetch_url = next(iter(ESOUI_WIKI_EVENT_FILTERS_URL.split("#", 1)))
+    mapping = {}
+    try:
+        req = urllib.request.Request(
+            fetch_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html_body = resp.read().decode("utf-8", errors="ignore")
+
+        mapping = _parse_wiki_event_filter_html(html_body)
+        if mapping:
+            try:
+                os.makedirs(os.path.dirname(WIKI_EVENT_FILTERS_CACHE_FILE), exist_ok=True)
+                with open(WIKI_EVENT_FILTERS_CACHE_FILE, "w", encoding="utf-8") as cf:
+                    json.dump(mapping, cf, indent=2, sort_keys=True)
+            except OSError:
+                pass
+    except Exception:
+        if os.path.isfile(WIKI_EVENT_FILTERS_CACHE_FILE):
+            try:
+                with open(WIKI_EVENT_FILTERS_CACHE_FILE, "r", encoding="utf-8") as cf:
+                    loaded = json.load(cf)
+                if isinstance(loaded, dict):
+                    mapping = loaded
+            except Exception:
+                pass
+
+    for ev_name, flt_list in mapping.items():
+        if not isinstance(flt_list, list) or not flt_list:
+            continue
+        if ev_name in EVENT_FILTER_RULES:
+            EVENT_FILTER_RULES[ev_name]["filters"].update(flt_list)
+        else:
+            topic = ev_name.removeprefix("EVENT_").replace("_", " ").lower()
+            _WIKI_DYNAMIC_EVENT_RULES[ev_name] = {
+                "filters": set(flt_list),
+                "rule_title": f"Use event filters for {topic} instead of checking code slower in lua",
+            }
 
 def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
     """Single-pass Lua lexer stripping comments and optionally strings while keeping line numbers."""
@@ -143,8 +325,6 @@ def strip_lua_comments_preserve_lines(content):
 
 def strip_lua_strings_preserve_lines(content):
     return strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
-
-
 def collect_addon_context(extract_dir):
     """Collects Bindings.xml presence, XML content, global tables, SavedVariables, and manifests."""
     has_bindings_xml = False
@@ -204,13 +384,11 @@ def collect_addon_context(extract_dir):
                         for m in tbl_matches:
                             if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', lua_clean):
                                 all_global_tables.add(m)
-                        # Register all top-level globals, dynamic _G[var] constants & CreateControlFromVirtual controls
                         rel_f = os.path.relpath(full_path, extract_dir).replace("\\", "/")
                         file_defined_globals = extract_globals_from_lua_source(raw_lua_txt, rel_f)
                         dynamic_globals.update(file_defined_globals.keys())
                         for v_ctrl, _ in extract_virtual_controls_from_lua(raw_lua_txt):
                             dynamic_globals.add(v_ctrl)
-
                     except Exception:
                         pass
 
@@ -236,8 +414,6 @@ def collect_addon_context(extract_dir):
         "root_addon_manifests": root_addon_manifests,
         "root_txt_manifests": root_txt_manifests,
     }
-
-
 def _collect_lua_local_identifiers(code_only):
     """Collects local variables, function parameters, and loop variables in a Lua file."""
     file_locals = set(re.findall(r'\blocal\s+function\s+([A-Za-z_][A-Za-z0-9_]*)', code_only))
@@ -313,6 +489,224 @@ def find_repeated_globals_in_lua(content, raw_lines, all_addon_globals, ram_dict
                     + "\n".join(formatted_hits)
                 )
     return primary_findings, minor_stdlib_findings
+def _split_top_level_lua_args(arg_str):
+    """Splits a Lua argument list on top-level commas, respecting (), {}, [], and quotes."""
+    args = []
+    depth_p = depth_b = depth_s = 0
+    in_quote = None
+    esc = False
+    curr = []
+    for ch in arg_str:
+        if in_quote:
+            curr.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+            curr.append(ch)
+        elif ch == "(":
+            depth_p += 1
+            curr.append(ch)
+        elif ch == ")":
+            depth_p = max(0, depth_p - 1)
+            curr.append(ch)
+        elif ch == "{":
+            depth_b += 1
+            curr.append(ch)
+        elif ch == "}":
+            depth_b = max(0, depth_b - 1)
+            curr.append(ch)
+        elif ch == "[":
+            depth_s += 1
+            curr.append(ch)
+        elif ch == "]":
+            depth_s = max(0, depth_s - 1)
+            curr.append(ch)
+        elif ch == "," and depth_p == 0 and depth_b == 0 and depth_s == 0:
+            args.append("".join(curr).strip())
+            curr = []
+        else:
+            curr.append(ch)
+    if curr:
+        args.append("".join(curr).strip())
+    return args
+
+
+def _extract_balanced_call_args(text, open_paren_pos):
+    """Returns (args_substring, close_paren_pos) starting at '(' or (None, -1)."""
+    n = len(text)
+    if open_paren_pos >= n or text[open_paren_pos] != "(":
+        return None, -1
+    depth = 0
+    in_quote = None
+    esc = False
+    for idx in range(open_paren_pos, n):
+        ch = text[idx]
+        if in_quote:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren_pos + 1:idx], idx
+    return None, -1
+
+
+def _extract_lua_function_body_from_offset(text, func_start_pos):
+    """Extracts (params_list, body_text) for a Lua function starting at 'function'."""
+    paren_pos = text.find("(", func_start_pos)
+    if paren_pos == -1:
+        return [], ""
+    params_raw, close_paren = _extract_balanced_call_args(text, paren_pos)
+    if params_raw is None:
+        return [], ""
+    params = [p.strip() for p in params_raw.split(",") if p.strip()]
+    token_rx = re.compile(r"\b(function|if|for|while|repeat|end|until)\b")
+    depth = 1
+    body_start = close_paren + 1
+    for tm in token_rx.finditer(text, body_start):
+        tok = tm.group(1)
+        if tok in ("function", "if", "for", "while", "repeat"):
+            depth += 1
+        elif tok in ("end", "until"):
+            depth -= 1
+            if depth == 0:
+                return params, text[body_start:tm.start()]
+    return params, text[body_start:]
+def _get_event_filter_spec(event_name):
+    """Returns (allowed_filter_types_set, rule_title) for filterable ESO events or (None, None)."""
+    _sync_wiki_event_filters_once()
+    if event_name in EVENT_FILTER_RULES:
+        spec = EVENT_FILTER_RULES[event_name]
+        return set(spec["filters"]), spec["rule_title"]
+    if event_name in _WIKI_DYNAMIC_EVENT_RULES:
+        spec = _WIKI_DYNAMIC_EVENT_RULES[event_name]
+        return set(spec["filters"]), spec["rule_title"]
+
+    if event_name in ESOUI_EVENT_HAS_UNIT_TAG:
+        return (
+            {"REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX"},
+            "Use event filters for unit tags instead of checking code slower in lua",
+        )
+    if event_name in ESOUI_EVENT_HAS_GAMEPAD_MODE:
+        return (
+            {"REGISTER_FILTER_IS_IN_GAMEPAD_PREFERRED_MODE"},
+            "Use event filters for gamepad preferred mode instead of checking code slower in lua",
+        )
+    return None, None
+
+
+def _check_lua_event_filters(content, raw_lines, lua_issues):
+    """
+    Prüft RegisterForEvent-Aufrufe für filterbare ESO-Events:
+      1) Wurde kein passendes AddFilterForEvent für das Event genutzt -> Critical Violation.
+      2) Wurde AddFilterForEvent genutzt, prüft aber der Callback denselben Parameter erneut im Lua-Code -> Critical Violation.
+    """
+    if not is_index_built():
+        build_esoui_index_once()
+
+    clean_code = strip_lua_comments_preserve_lines(content)
+    reg_rx = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_.:]*\s*:\s*)?RegisterForEvent\s*\(')
+    flt_rx = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_.:]*\s*:\s*)?AddFilterForEvent\s*\(')
+
+    func_bodies = {}
+    for fm in re.finditer(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(', clean_code):
+        full_fn = fm.group(1)
+        params, body = _extract_lua_function_body_from_offset(clean_code, fm.start())
+        func_bodies[full_fn] = (params, body)
+        func_bodies[full_fn.split(".")[-1].split(":")[-1]] = (params, body)
+
+    filters_by_event = defaultdict(list)
+    for m in flt_rx.finditer(clean_code):
+        args_raw, _ = _extract_balanced_call_args(clean_code, m.end() - 1)
+        if not args_raw:
+            continue
+        args = _split_top_level_lua_args(args_raw)
+        if len(args) < 4:
+            continue
+        handle_expr, ev_name = args[0], args[1]
+        if not ev_name.startswith("EVENT_"):
+            continue
+        pairs = []
+        for idx_p in range(2, len(args) - 1, 2):
+            f_type = args[idx_p].strip()
+            f_val = args[idx_p + 1].strip()
+            if f_type.startswith("REGISTER_FILTER_"):
+                pairs.append((f_type, f_val))
+        if pairs:
+            filters_by_event[ev_name].append((handle_expr, pairs))
+
+    for m in reg_rx.finditer(clean_code):
+        args_raw, _ = _extract_balanced_call_args(clean_code, m.end() - 1)
+        if not args_raw:
+            continue
+        args = _split_top_level_lua_args(args_raw)
+        if len(args) < 3:
+            continue
+        handle_expr, ev_name, cb_expr = args[0], args[1], args[2]
+        allowed_filters, rule_title = _get_event_filter_spec(ev_name)
+        if not allowed_filters:
+            continue
+
+        line_no = clean_code.count("\n", 0, m.start()) + 1
+        orig_line = raw_lines[line_no - 1].strip() if (line_no - 1) < len(raw_lines) else ""
+        ev_filters = filters_by_event.get(ev_name, [])
+        matching_handles = [
+            pairs for h_expr, pairs in ev_filters
+            if h_expr == handle_expr or any(ft in allowed_filters for ft, _ in pairs)
+        ]
+
+        if not matching_handles:
+            lua_issues.append(f"{rule_title}: {ev_name} (line {line_no}) ({orig_line})")
+            continue
+
+        cb_params, cb_body = [], ""
+        if cb_expr.startswith("function"):
+            cb_params, cb_body = _extract_lua_function_body_from_offset(clean_code, m.start() + m.group(0).find("("))
+        else:
+            cb_key = cb_expr.strip()
+            if cb_key in func_bodies:
+                cb_params, cb_body = func_bodies[cb_key]
+            elif cb_key.split(".")[-1].split(":")[-1] in func_bodies:
+                cb_params, cb_body = func_bodies[cb_key.split(".")[-1].split(":")[-1]]
+
+        if not cb_params or not cb_body:
+            continue
+
+        for pairs in matching_handles:
+            for f_type, f_val in pairs:
+                p_idx = FILTER_TYPE_PARAM_INDEX.get((ev_name, f_type))
+                if p_idx is None:
+                    sig = ESOUI_EVENT_PARAM_TYPES.get(ev_name, [])
+                    for s_idx, (s_type, s_name) in enumerate(sig, 1):
+                        if f_type in ("REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX") and (
+                            "unittag" in s_name.lower() or "unittag" in s_type.lower()
+                        ):
+                            p_idx = s_idx
+                            break
+                if p_idx is not None and p_idx < len(cb_params):
+                    param_var = cb_params[p_idx]
+                    if param_var and param_var != "_" and re.search(
+                        r'\bif\b[^;\n]*\b' + re.escape(param_var) + r'\b\s*(?:==|~=)', cb_body
+                    ):
+                        lua_issues.append(
+                            f"{rule_title}: {ev_name} (line {line_no}) "
+                            f"({orig_line} -- redundant '{param_var}' check in callback despite {f_type}={f_val})"
+                        )
 def _check_lua_ai_slop_patterns(content, raw_lines):
     """Detects defensive pcall() and unnecessary 'if ESO_GLOBAL then' existence checks."""
     if not is_index_built():
@@ -368,9 +762,7 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
 def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=None):
     """
     Detects global variable assignments (missing 'local') anywhere in a Lua file,
-    accurately ignoring table constructor fields (including nested LAM menus like 'helpUrl = ...')
-    while still catching global leaks inside table callbacks (e.g. 'setFunc = function() leak = 1 end').
-    Globals prefixed with '<GlobalAddonTable>_' (e.g. FCOIS_DEBUG_DEPTH_NORMAL) are routed to Best Practices.
+    accurately ignoring table constructor fields while still catching global leaks inside table callbacks.
     """
     if not is_index_built():
         build_esoui_index_once()
@@ -437,9 +829,6 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
                     lua_issues.append(
                         f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
                     )
-
-
-
 def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx=None):
     """Detects unconditional chat output inside EVENT_ADD_ON_LOADED / EVENT_PLAYER_ACTIVATED handlers."""
     code_no_strings = strip_lua_strings_preserve_lines(comment_free_lua)
@@ -477,6 +866,7 @@ def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, a
                 inline_event_lines.append(idx)
             else:
                 callback_names.add(target.split(".")[-1].split(":")[-1])
+
     def _is_opt_in_if_condition(if_line_text):
         cond_match = re.search(r'\bif\b(.*?)\bthen\b', if_line_text)
         if not cond_match:
@@ -551,22 +941,20 @@ def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, a
             "or make the loaded messages opt-in for the interested-in users (via slash_command and/or settings menu):\n"
             + formatted
         )
-
-
-def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues):
+def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=None):
     """Checks global table pollution, multiple global tables, global functions, and local aliases."""
     lua_suggestions = []
     has_bindings_xml = addon_ctx["has_bindings_xml"]
     combined_xml_content = addon_ctx["xml_content"]
-    all_addon_globals = addon_ctx["all_global_tables"]
+    all_addon_globals = set(addon_ctx["all_global_tables"]) | set(dep_globals_set or set())
 
     if not is_index_built():
         build_esoui_index_once()
 
-    if len(all_addon_globals) > 1:
-        sorted_globals = ", ".join(sorted(all_addon_globals))
+    if len(addon_ctx["all_global_tables"]) > 1:
+        sorted_globals = ", ".join(sorted(addon_ctx["all_global_tables"]))
         lua_issues.append(
-            f"Multiple Global Addon Tables: Found {len(all_addon_globals)} global tables across the addon ({sorted_globals}). "
+            f"Multiple Global Addon Tables: Found {len(addon_ctx['all_global_tables'])} global tables across the addon ({sorted_globals}). "
             "Only ONE global table per addon is allowed; attach sub-tables to your main addon table instead!"
         )
     func_def_rx = re.compile(r'^(?!local\s)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
@@ -657,14 +1045,15 @@ def extract_globals_from_lua_source(lua_code, rel_display_path):
         for km in re.finditer(r'(?<![A-Za-z0-9_.:])\b([A-Z][A-Z0-9_]{2,})\b\s*=(?!=)', clean_lua):
             _record(km.group(1), km.start(1))
     return exposed
-
-
 def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     """Runs all static checks on a single Lua source file and queues unverified globals for AI."""
     lua_file_count = sum(
         1 for _, _, files in (os.walk(active_extract_dir) if os.path.exists(active_extract_dir) else [])
         for f in files if f.lower().endswith('.lua')
     )
+
+    dep_globals_map = collect_dependency_globals(active_extract_dir, extract_globals_from_lua_source)
+    dep_globals_set = set(dep_globals_map.keys())
 
     lua_issues = []
     for ln_no, orig_line in find_uncommented_libstub_hits(content):
@@ -677,9 +1066,10 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
 
     move_to_table_hits = []
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
+    _check_lua_event_filters(content, raw_lines, lua_issues)
     _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=move_to_table_hits)
     lua_suggestions = _check_lua_global_tables_and_locals(
-        comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues
+        comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=dep_globals_set
     )
     if move_to_table_hits:
         formatted_mtt = "\n".join(f"    {ln}: --{orig}" for ln, orig in move_to_table_hits)
@@ -709,7 +1099,6 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         sugg_str = "\n".join(["  - " + s for s in lua_suggestions]) if lua_suggestions else "None"
         return "[STATUS] FAIL\n[CRITICAL VIOLATIONS]\n" + issues_str + "\n[BEST PRACTICE SUGGESTIONS]\n" + sugg_str + ai_slop_block
 
-
     clean_code_for_words = strip_lua_strings_preserve_lines(comment_free_lua)
     flattened_content = re.sub(r'\s+', ' ', clean_code_for_words)
     table_keys_to_ignore = set()
@@ -730,7 +1119,6 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     blessed_keywords = {str(addon_main_namespace)} | addon_ctx["all_global_tables"] | addon_ctx.get("dynamic_globals", set())
 
     candidate_unknowns = []
-
     cross_ref_start = datetime.now()
     for word in words_to_check:
         if word not in ESOUI_RAM_DICTIONARY and word not in blessed_keywords:
@@ -745,7 +1133,6 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         candidate_unknowns.sort()
         print(f"    ├── {C.YELLOW}Unknown globals detected:{C.RESET} {', '.join(candidate_unknowns)}")
         print(f"    │     {C.CYAN}Searching in ESO AddOns folder for Dependency defined globals...{C.RESET}")
-        dep_globals_map = collect_dependency_globals(active_extract_dir, extract_globals_from_lua_source)
         for word in candidate_unknowns:
             if word in dep_globals_map:
                 print(f"    │     {C.GREEN}[OK]{C.RESET}  {word} -> {dep_globals_map[word]}")
@@ -762,7 +1149,6 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
             print(f"    ├── {C.CYAN}Potential AI code hints added to report{C.RESET}")
         print(f"    └── {C.GREEN}[PASS]{C.RESET} Static check passed.")
         return "[STATUS] PASS" + ai_slop_block
-
 
     unverified_identifiers.sort()
     print(f"    └── {C.BLUE}[QUEUE FOR AI]{C.RESET} {C.CYAN}Unverified globals: {', '.join(unverified_identifiers[:15])}{C.RESET}")

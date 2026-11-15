@@ -29,7 +29,10 @@ BLOCKED_EXECUTABLE_EXTENSIONS = {
 FORBIDDEN_KEYWORDS = {'.github', '.vs', '.idea', '.git'}
 FORBIDDEN_OS_JUNK_NAMES = {"__macosx", "thumbs.db", "desktop.ini", ".ds_store"}
 EXCLUDED_DEPENDENCY_ADDON_FOLDERS = {"DumpVars"}
-
+# Relative paths or fnmatch wildcard patterns inside ESO_ADDONS_DIR to skip during dependency scanning
+EXCLUDED_DEPENDENCY_FILES = {
+    "/TamrielTradeCentre/PriceTable*.lua",
+}
 LUA_STD_LIBS = {
     "string", "table", "math", "pairs", "ipairs", "next", "select", "unpack",
     "type", "tostring", "tonumber", "pcall", "xpcall", "error", "assert",
@@ -54,9 +57,12 @@ ESOUI_LATEST_MAX_ITEMS = 200
 ESOUI_BATCH_CHUNK_SIZE = 10
 
 _ESOUI_BASE = "https://" + "www.esoui.com"
+_ESOUI_WIKI_BASE = "https://" + "wiki.esoui.com"
 ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX = _ESOUI_BASE + "/downloads/info"
 ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX = _ESOUI_BASE + "/downloads/dl"
 ESOUI_UPLOAD_RULES_URL = _ESOUI_BASE + "/forums/showthread.php?t=10790"
+ESOUI_WIKI_EVENT_FILTERS_URL = _ESOUI_WIKI_BASE + "/AddFilterForEvent#Filter_Types"
+
 
 # Local Ollama model configuration
 OLLAMA_HOST = "http://localhost:11434"
