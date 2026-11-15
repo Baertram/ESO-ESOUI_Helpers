@@ -34,10 +34,11 @@ ESOUI_UNDOCUMENTED_SET = set()
 ESOUI_INDEX_BUILT = False
 
 
-def extract_resolved_xml_control_names(xml_text):
+def extract_resolved_xml_control_names(xml_text, template_children_map=None):
     """
     Resolves hierarchical ESO XML control names including $(parent), $(parentParent),
-    $(grandparent), etc. across nested XML tags, returning [(resolved_name, line_no), ...].
+    $(grandparent), and inherited virtual control children across nested XML tags.
+    Returns [(resolved_name, line_no), ...].
     """
     if not xml_text or "name" not in xml_text:
         return []
@@ -51,6 +52,7 @@ def extract_resolved_xml_control_names(xml_text):
 
     tag_rx = re.compile(r"<(/?)([A-Za-z_][A-Za-z0-9_:-]*)([^<>]*?)(/?)>", flags=re.DOTALL)
     name_attr_rx = re.compile(r'\bname\s*=\s*["\']([^"\']+)["\']')
+    inherits_attr_rx = re.compile(r'\binherits\s*=\s*["\']([^"\']+)["\']')
     parent_token_rx = re.compile(r"\$\((parent(?:Parent)*|grandparent)\)", flags=re.IGNORECASE)
 
     tag_stack = []
@@ -91,6 +93,14 @@ def extract_resolved_xml_control_names(xml_text):
                 resolved_name = candidate
                 line_no = clean_xml.count("\n", 0, m.start()) + 1
                 resolved_list.append((resolved_name, line_no))
+                if template_children_map:
+                    inh_m = inherits_attr_rx.search(attrs)
+                    if inh_m:
+                        for base_tpl in inh_m.group(1).split():
+                            for suffix_rel in template_children_map.get(base_tpl.strip(), ()):
+                                full_inh_name = f"{resolved_name}{suffix_rel}"
+                                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", full_inh_name):
+                                    resolved_list.append((full_inh_name, line_no))
 
         if not is_self_closing:
             tag_stack.append((tag_name, resolved_name))
@@ -294,56 +304,103 @@ def build_esoui_index_once():
             print(f"{C.RED}       Error indexing API doc: {str(e)}{C.RESET}")
     if os.path.exists(ESO_LIVE_SOURCE_DIR):
         file_count = 0
+        # Pass 1: collect virtual XML templates (virtual="true") and their $(parent)... relative child suffixes
+        xml_template_children = {}
+        all_source_files = []
         for root, _, files in os.walk(ESO_LIVE_SOURCE_DIR):
-            for file in files:
+            for file in sorted(files):
                 if file.endswith(('.lua', '.xml')):
-                    file_path = os.path.join(root, file)
-                    rel_display = os.path.relpath(file_path, ESO_LIVE_SOURCE_DIR).replace("\\", "/")
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            full_content = f.read()
-                        for line in full_content.splitlines():
-                            cleaned_line = line.strip()
-                            if cleaned_line:
-                                for w in set(broad_extractor.findall(cleaned_line)):
-                                    if len(w) >= 3 and w not in ESOUI_RAM_DICTIONARY:
-                                        ESOUI_RAM_DICTIONARY[w] = f"ESOUI Source ({file}): {cleaned_line}"
-                        if file.lower().endswith('.lua'):
-                            for v_ctrl, line_no in extract_virtual_controls_from_lua(full_content):
-                                if v_ctrl not in ESOUI_RAM_DICTIONARY:
-                                    ESOUI_RAM_DICTIONARY[v_ctrl] = f"ESOUI Virtual Control ({rel_display}:{line_no})"
-                            # Count MenuBar buttons per file via ZO_MenuBar_AddButton(...) or descriptor = entries for referenced ZO_*MenuBar controls
-                            mb_controls = set(re.findall(r'\b(ZO_[A-Za-z0-9_]+MenuBar)\b', full_content))
-                            if mb_controls:
-                                add_btn_calls = len(re.findall(r'\bZO_MenuBar_AddButton\s*\(', full_content))
-                                descriptor_entries = len(re.findall(r'\bdescriptor\s*=', full_content))
-                                btn_count = max(add_btn_calls, descriptor_entries, 4)
-                                for mb_name in mb_controls:
-                                    for btn_idx in range(1, btn_count + 1):
-                                        btn_name = f"{mb_name}Button{btn_idx}"
-                                        if btn_name not in ESOUI_RAM_DICTIONARY:
-                                            ESOUI_RAM_DICTIONARY[btn_name] = f"ESOUI MenuBar Button ({rel_display})"
+                    full_p = os.path.join(root, file)
+                    all_source_files.append(full_p)
+                    if file.lower().endswith('.xml'):
+                        try:
+                            with open(full_p, 'r', encoding='utf-8', errors='ignore') as xf:
+                                x_txt = xf.read()
+                            if 'virtual="true"' in x_txt or "virtual='true'" in x_txt:
+                                for tpl_m in re.finditer(
+                                    r'<([A-Za-z_][A-Za-z0-9_:-]*)\b[^>]*\bname\s*=\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\'][^>]*\bvirtual\s*=\s*["\']true["\'][^>]*>',
+                                    x_txt,
+                                ):
+                                    tpl_tag, tpl_name = tpl_m.group(1), tpl_m.group(2)
+                                    end_tag = f"</{tpl_tag}>"
+                                    end_pos = x_txt.find(end_tag, tpl_m.end())
+                                    if end_pos != -1:
+                                        inner_xml = x_txt[tpl_m.end():end_pos]
+                                        child_rels = re.findall(r'\bname\s*=\s*["\']\$\(parent\)([A-Za-z0-9_]+)["\']', inner_xml)
+                                        if child_rels:
+                                            xml_template_children.setdefault(tpl_name, set()).update(child_rels)
+                        except Exception:
+                            pass
+
+        module_menu_bars = {}
+        module_lua_btn_counts = {}
+
+        def _feature_stem(filename):
+            stem = os.path.splitext(filename)[0].lower()
+            stem = re.sub(r'_(?:keyboard|gamepad|shared)$', '', stem)
+            return stem
+
+        for file_path in all_source_files:
+            file = os.path.basename(file_path)
+            rel_display = os.path.relpath(file_path, ESO_LIVE_SOURCE_DIR).replace("\\", "/")
+            feat_key = _feature_stem(file)
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    full_content = f.read()
+                for line in full_content.splitlines():
+                    cleaned_line = line.strip()
+                    if cleaned_line:
+                        for w in set(broad_extractor.findall(cleaned_line)):
+                            if len(w) >= 3 and w not in ESOUI_RAM_DICTIONARY:
+                                ESOUI_RAM_DICTIONARY[w] = f"ESOUI Source ({file}): {cleaned_line}"
+                if file.lower().endswith('.xml'):
+                    for name_val, line_no in extract_resolved_xml_control_names(full_content, xml_template_children):
+                        if name_val not in ESOUI_RAM_DICTIONARY:
+                            ESOUI_RAM_DICTIONARY[name_val] = f"ESOUI XML Control ({rel_display}:{line_no})"
+                        if name_val.endswith("MenuBar") and name_val.startswith("ZO_"):
+                            module_menu_bars.setdefault(feat_key, set()).add(name_val)
+                elif file.lower().endswith('.lua'):
+                    for v_ctrl, line_no in extract_virtual_controls_from_lua(full_content):
+                        if v_ctrl not in ESOUI_RAM_DICTIONARY:
+                            ESOUI_RAM_DICTIONARY[v_ctrl] = f"ESOUI Virtual Control ({rel_display}:{line_no})"
+                    for mb_lit in re.findall(r'\b(ZO_[A-Za-z0-9_]+MenuBar)\b', full_content):
+                        module_menu_bars.setdefault(feat_key, set()).add(mb_lit)
+
+                    add_btn_calls = len(re.findall(r'\bZO_MenuBar_AddButton\s*\(', full_content))
+                    descriptor_entries = len(re.findall(r'\bdescriptor\s*=', full_content))
+                    tab_filter_entries = len(re.findall(r'\bCreateNewTabFilterData\s*\(', full_content))
+                    file_btn_count = max(add_btn_calls, descriptor_entries, tab_filter_entries)
+                    if file_btn_count > 0:
+                        prev_cnt = module_lua_btn_counts.get(feat_key, 0)
+                        if file_btn_count > prev_cnt:
+                            module_lua_btn_counts[feat_key] = file_btn_count
+
+                    # Catch dynamic CreateControlFromVirtual("Prefix", parent, "Tpl", i) -> Prefix1..Prefix10
+                    for dyn_m in re.finditer(
+                        r"""\bCreateControlFromVirtual\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*,\s*[^,]+,\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*\)""",
+                        full_content,
+                    ):
+                        base_p = dyn_m.group(1)
+                        ln_no = full_content.count("\n", 0, dyn_m.start()) + 1
+                        for idx_num in range(1, 11):
+                            cand_ctrl = f"{base_p}{idx_num}"
+                            if cand_ctrl not in ESOUI_RAM_DICTIONARY:
+                                ESOUI_RAM_DICTIONARY[cand_ctrl] = f"ESOUI Virtual Control ({rel_display}:{ln_no})"
+
+                file_count += 1
+            except Exception:
+                pass
 
 
-                            # Catch dynamic CreateControlFromVirtual("Prefix", parent, "Tpl", i) -> Prefix1..Prefix10
-                            for dyn_m in re.finditer(
-                                r"""\bCreateControlFromVirtual\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*,\s*[^,]+,\s*["'][A-Za-z_][A-Za-z0-9_]*["']\s*,\s*[A-Za-z_][A-Za-z0-9_]*\s*\)""",
-                                full_content,
-                            ):
-                                base_p = dyn_m.group(1)
-                                ln_no = full_content.count("\n", 0, dyn_m.start()) + 1
-                                for idx_num in range(1, 11):
-                                    cand_ctrl = f"{base_p}{idx_num}"
-                                    if cand_ctrl not in ESOUI_RAM_DICTIONARY:
-                                        ESOUI_RAM_DICTIONARY[cand_ctrl] = f"ESOUI Virtual Control ({rel_display}:{ln_no})"
-                        elif file.lower().endswith('.xml'):
-                            for name_val, line_no in extract_resolved_xml_control_names(full_content):
-                                if name_val not in ESOUI_RAM_DICTIONARY:
-                                    ESOUI_RAM_DICTIONARY[name_val] = f"ESOUI XML Control ({rel_display}:{line_no})"
+        for feat_key, mb_names in module_menu_bars.items():
+            exact_btn_count = module_lua_btn_counts.get(feat_key, 0)
+            if exact_btn_count > 0:
+                for mb_name in mb_names:
+                    for btn_idx in range(1, exact_btn_count + 1):
+                        btn_name = f"{mb_name}Button{btn_idx}"
+                        if btn_name not in ESOUI_RAM_DICTIONARY:
+                            ESOUI_RAM_DICTIONARY[btn_name] = f"ESOUI MenuBar Button ({mb_name})"
 
-                        file_count += 1
-                    except Exception:
-                        pass
         print(f"{C.CYAN}       Indexed {C.WHITE}{file_count}{C.CYAN} source files into keyword mapping.{C.RESET}")
 
     if os.path.exists(ESO_EXTRA_GLOBALS_FILE):
