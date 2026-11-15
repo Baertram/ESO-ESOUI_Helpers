@@ -518,6 +518,73 @@ def _ensure_ollama_and_model_ready(model_name):
     return OLLAMA_PREFLIGHT_CACHE
 
 
+def _split_large_lua_file_for_ai(rel_path, source_text, max_chars=14000):
+    """
+    Splits an oversized Lua file at top-level block boundaries ('end' at depth 0)
+    so each chunk fits comfortably within Ollama's timeout window without breaking functions.
+    Prepends top-level 'local' header declarations as read-only context for parts 2..N.
+    """
+    if len(source_text) <= max_chars or not rel_path.lower().endswith(".lua"):
+        return [(rel_path, source_text)]
+
+    lines = source_text.splitlines()
+    # Collect top-level 'local' declarations at the top of the file as context for later chunks
+    header_locals = []
+    for ln in lines[:120]:
+        s = ln.strip()
+        if s.startswith("local ") and not s.startswith("local function"):
+            header_locals.append(ln)
+    header_ctx = "\n".join(header_locals[:40])
+
+    open_rx = re.compile(r"\b(function|if|for|while|repeat|do)\b")
+    close_rx = re.compile(r"\b(end|until)\b")
+
+    chunks = []
+    curr_lines = []
+    curr_len = 0
+    depth = 0
+
+    for ln in lines:
+        code_part = re.sub(r"--.*$", "", ln)
+        code_part = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', '""', code_part)
+        code_part = re.sub(r"'[^'\\]*(?:\\.[^'\\]*)*'", "''", code_part)
+
+        opens = len(open_rx.findall(code_part))
+        closes = len(close_rx.findall(code_part))
+
+        curr_lines.append(ln)
+        curr_len += len(ln) + 1
+        depth = max(0, depth + opens - closes)
+
+        # Split cleanly right after a top-level block closes (depth == 0)
+        if depth == 0 and curr_len >= max_chars:
+            chunks.append("\n".join(curr_lines))
+            curr_lines = []
+            curr_len = 0
+
+    if curr_lines:
+        chunks.append("\n".join(curr_lines))
+
+    if len(chunks) <= 1:
+        return [(rel_path, source_text)]
+
+    total_parts = len(chunks)
+    result_parts = []
+    for idx, chunk_body in enumerate(chunks, 1):
+        if idx == 1 or not header_ctx:
+            part_payload = f"-- [AI CHUNK {idx}/{total_parts} OF {rel_path}]\n{chunk_body}"
+        else:
+            part_payload = (
+                f"-- [AI CHUNK {idx}/{total_parts} OF {rel_path} - CONTINUATION]\n"
+                f"-- [FILE-LEVEL LOCALS CONTEXT START - DO NOT FLAG AS UNUSED]\n"
+                f"{header_ctx}\n"
+                f"-- [FILE-LEVEL LOCALS CONTEXT END]\n\n"
+                f"{chunk_body}"
+            )
+        result_parts.append((f"{rel_path} (part {idx}/{total_parts})", part_payload))
+    return result_parts
+
+
 def _run_ai_code_review(addon_code_bundle):
     """Reviews queued files sequentially with Ollama and returns parsed AI findings [(rel_path, status, crit_lines, bp_lines)]."""
     ai_findings = []
@@ -530,22 +597,42 @@ def _run_ai_code_review(addon_code_bundle):
         print(f"  {C.YELLOW}⚠ AI review skipped: {status_reason} Using RAM tracker fallback...{C.RESET}")
         return ai_findings
 
-    total_files = len(addon_code_bundle)
-    print(f"\n  {C.BLUE}{C.BOLD}[AI REVIEW] Reviewing {total_files} file(s) with Ollama ({MODEL_NAME})...{C.RESET}")
-
-    for idx, file_block in enumerate(addon_code_bundle, 1):
+    expanded_work_items = []
+    for raw_idx, file_block in enumerate(addon_code_bundle, 1):
         lines = file_block.splitlines()
         first_line = next(iter(lines), "")
-        rel_path = first_line.replace("### START_FILE:", "").strip() or f"file_{idx}"
-        print(f"  {C.CYAN}[AI {idx}/{total_files}]{C.RESET} Reviewing {C.BOLD}{rel_path}{C.RESET}...")
+        orig_rel_path = first_line.replace("### START_FILE:", "").strip() or f"file_{raw_idx}"
+        marker = "[SOURCE_CODE]\n"
+        end_marker = f"\n### END_FILE: {orig_rel_path}"
+        if marker in file_block:
+            body_part = file_block.split(marker, 1)[1]
+            if end_marker in body_part:
+                body_part = body_part.split(end_marker, 1)[0]
+        else:
+            body_part = file_block
 
-        review_payload = file_block[:42000]
+        parts = _split_large_lua_file_for_ai(orig_rel_path, body_part, max_chars=14000)
+        if len(parts) > 1:
+            print(
+                f"  {C.YELLOW}ℹ Splitting large file {C.BOLD}{orig_rel_path}{C.RESET}{C.YELLOW} "
+                f"into {len(parts)} scope-safe chunks to prevent AI timeout.{C.RESET}"
+            )
+        for display_label, part_code in parts:
+            expanded_work_items.append((orig_rel_path, display_label, part_code))
+
+    total_items = len(expanded_work_items)
+    print(f"\n  {C.BLUE}{C.BOLD}[AI REVIEW] Reviewing {total_items} item(s) with Ollama ({MODEL_NAME})...{C.RESET}")
+
+    for idx, (orig_rel_path, display_label, part_code) in enumerate(expanded_work_items, 1):
+        print(f"  {C.CYAN}[AI {idx}/{total_items}]{C.RESET} Reviewing {C.BOLD}{display_label}{C.RESET}...")
+
+        review_payload = f"### START_FILE: {display_label}\n\n[SOURCE_CODE]\n{part_code}\n### END_FILE: {display_label}\n"
         prompt = (
             f"You are a strict, silent code reviewer for Elder Scrolls Online addons.\n"
-            f"Review the single file below against these rules:\n{CUSTOM_RULES}\n\n"
+            f"Review the code section below (which may be a numbered part of a larger file) against these rules:\n{CUSTOM_RULES}\n\n"
             f"FILE TO REVIEW:\n\"\"\"\n{review_payload}\n\"\"\"\n\n"
             f"Output ONLY plain text using:\n"
-            f"--- [File: {rel_path}] ---\n[STATUS] PASS or FAIL\n"
+            f"--- [File: {orig_rel_path}] ---\n[STATUS] PASS or FAIL\n"
             f"[CRITICAL VIOLATIONS] None OR itemized list\n"
             f"[BEST PRACTICE SUGGESTIONS] None OR itemized list\n"
         )
@@ -571,10 +658,10 @@ def _run_ai_code_review(addon_code_bundle):
             executor.shutdown(wait=False)
             ai_response = response.get("response", "").strip()
             if "--- [File:" in ai_response and "[STATUS]" in ai_response:
-                ai_findings.append((rel_path, ai_response))
+                ai_findings.append((orig_rel_path, ai_response))
         except Exception as e:
             executor.shutdown(wait=False)
-            print(f"    └── {C.YELLOW}⚠ AI fallback for {rel_path}: {e}{C.RESET}")
+            print(f"    └── {C.YELLOW}⚠ AI fallback for {display_label}: {e}{C.RESET}")
 
     return ai_findings
 def _parse_findings_into_report_data(rel_path, category, raw_result, report_data):
@@ -657,7 +744,9 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
     if report_data.get("zip_tree_bbcode"):
         out.append(report_data["zip_tree_bbcode"])
 
+    unverified_entries = report_data.get("unverified_globals") or []
     has_crit = bool(report_data["zip_violations"]) or any(bool(v) for v in report_data["critical"].values())
+    has_unverified = bool(unverified_entries)
     has_bp = bool(report_data["best_practices"]) or bool(report_data.get("bp_grouped_globals"))
 
     if has_crit:
@@ -685,6 +774,17 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                     out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
 
+    if has_unverified:
+        out.append("")
+        out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrchid"{rb}{lb}FONT="Impact"{rb}Unverified Globals{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+        out.append("")
+        out.append(f"{lb}u{rb}Not found in ESO API Documentation / Custom-Stubs (please verify local/global scope){lb}/u{rb}")
+        out.append(f"{lb}list{rb}")
+        for f_path, code_txt in unverified_entries:
+            spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+            out.append(f"{lb}*{rb} {f_path}{spoiler_part}")
+        out.append(f"{lb}/list{rb}")
+
     if has_bp:
         out.append("")
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrange"{rb}{lb}FONT="Impact"{rb}Best practices{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
@@ -711,9 +811,9 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                 total_hits = sum(len(hits) for hits in files_map.values())
                 spoiler_lines = []
                 for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
-                    spoiler_lines.append(f"{lb}b{rb}{f_path}{lb}/b{rb}")
+                    spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
                     for ln_no, code_txt in files_map[f_path]:
-                        spoiler_lines.append(f"{ln_no}: {code_txt}")
+                        spoiler_lines.append(f"  {ln_no}: {code_txt}")
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(
                     f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
@@ -733,7 +833,7 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
                 out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             out.append(f"{lb}/list{rb}")
 
-    if not has_crit and not has_bp:
+    if not has_crit and not has_unverified and not has_bp:
         out.append("")
         out.append(f'{lb}color="Green"{rb}No critical violations or best practice issues found.{lb}/color{rb}')
 
@@ -851,8 +951,8 @@ def process_addon(zip_path, zip_name):
 
     for leak_file, leaks in BATCH_LEAK_TRACKER.items():
         if leaks:
-            report_data["best_practices"]["Possible action: Unverified Globals found (Not in API-Doc / Custom-Stubs)"].append(
-                (leak_file.replace("\\", "/"), None, ", ".join(leaks))
+            report_data.setdefault("unverified_globals", []).append(
+                (leak_file.replace("\\", "/"), ", ".join(leaks))
             )
     for bp_file, suggs in BATCH_BEST_PRACTICE_TRACKER.items():
         if suggs:

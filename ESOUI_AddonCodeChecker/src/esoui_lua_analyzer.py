@@ -351,19 +351,17 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
 
 
 def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
-    """Detects global variable assignments (missing 'local') anywhere in a Lua file."""
+    """
+    Detects global variable assignments (missing 'local') anywhere in a Lua file,
+    accurately ignoring table constructor fields (including nested LAM menus like 'helpUrl = ...')
+    while still catching global leaks inside table callbacks (e.g. 'setFunc = function() leak = 1 end').
+    """
     if not is_index_built():
         build_esoui_index_once()
 
     code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
     lines = code_only.splitlines()
     file_locals = _collect_lua_local_identifiers(code_only)
-
-    # Collect inline table literal keys ({ key = val }) so they are never misflagged as globals
-    flattened = re.sub(r'\s+', ' ', code_only)
-    table_keys = set()
-    for block in re.findall(r'\{([^{}]+)\}', flattened):
-        table_keys.update(re.findall(r'(?<!\[)\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=(?!=)', block))
 
     allowed_globals = (
         set(addon_ctx.get("all_global_tables", set()))
@@ -378,23 +376,43 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
         "not", "while", "repeat", "until", "break", "do", "self", "_"
     }
 
-    assign_rx = re.compile(r'(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)')
+    # Stack tracking active construct: 'table' for '{ ... }' vs 'block' for 'function/if/for/while/do/repeat ... end/until'
+    scope_stack = []
+    token_rx = re.compile(
+        r'(\{)|(\})|\b(function|if|for|while|repeat|do)\b|\b(end|until)\b|(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)'
+    )
+
     for idx, line in enumerate(lines, 1):
         stripped = line.strip()
-        if not stripped or stripped.startswith("local "):
+        if not stripped:
             continue
-        for m in assign_rx.finditer(line):
-            var_name = m.group(1)
-            if var_name in lua_keywords or var_name in file_locals or var_name in table_keys or var_name in allowed_globals:
-                continue
-            prefix = line[:m.start(1)].rstrip()
-            # Skip table field assignments (obj.field = ...), indexed targets, or 'for var = 1, 10'
-            if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
-                continue
-            orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
-            lua_issues.append(
-                f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
-            )
+        is_local_stmt = stripped.startswith("local ")
+
+        for m in token_rx.finditer(line):
+            g_open_brace, g_close_brace, g_block_open, g_block_close, var_name = m.groups()
+            if g_open_brace:
+                scope_stack.append("table")
+            elif g_close_brace:
+                if scope_stack and scope_stack[-1] == "table":
+                    scope_stack.pop()
+            elif g_block_open:
+                scope_stack.append("block")
+            elif g_block_close:
+                if scope_stack and scope_stack[-1] == "block":
+                    scope_stack.pop()
+            elif var_name and not is_local_stmt:
+                # Directly inside a table constructor (top of scope_stack is 'table') -> table field key, not a global
+                if scope_stack and scope_stack[-1] == "table":
+                    continue
+                if var_name in lua_keywords or var_name in file_locals or var_name in allowed_globals:
+                    continue
+                prefix = line[:m.start(5)].rstrip()
+                if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
+                    continue
+                orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
+                lua_issues.append(
+                    f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
+                )
 
 
 def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx=None):

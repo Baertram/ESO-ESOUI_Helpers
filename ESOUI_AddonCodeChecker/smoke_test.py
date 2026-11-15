@@ -265,6 +265,48 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertIsNone(err_s)
             self.assertEqual(cmd_search, "search author Baertram")
 
+    def test_06_dependency_globals_hash_cache(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import _extract_defined_lua_globals
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addons_dir = os.path.join(tmp_dir, "AddOns")
+            lib_dir = os.path.join(addons_dir, "LibFilters-3.0")
+            extract_dir = os.path.join(tmp_dir, "Extract", "MyAddon")
+            os.makedirs(lib_dir, exist_ok=True)
+            os.makedirs(extract_dir, exist_ok=True)
+
+            with open(os.path.join(lib_dir, "LibFilters-3.0.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: LibFilters-3.0\nLibFilters-3.0.lua\n")
+            lib_lua = os.path.join(lib_dir, "LibFilters-3.0.lua")
+            with open(lib_lua, "w", encoding="utf-8") as lf:
+                lf.write(
+                    'local filterNames = { "LF_SMITHING_DECONSTRUCT", "LF_SMITHING_IMPROVEMENT" }\n'
+                    'for i, name in ipairs(filterNames) do _G[name] = i end\n'
+                )
+
+            with open(os.path.join(extract_dir, "MyAddon.txt"), "w", encoding="utf-8") as amf:
+                amf.write("## Title: MyAddon\n## DependsOn: LibFilters-3.0>=350\n")
+
+            cache_file = os.path.join(tmp_dir, "Cache", "dependency_globals_cache.json")
+            with patch.object(esoui_ram_index, "ESO_ADDONS_DIR", addons_dir), patch.object(
+                esoui_ram_index, "DEPENDENCY_CACHE_FILE", cache_file
+            ), patch.object(esoui_ram_index, "DEPENDENCY_GLOBALS_CACHE", {}), patch.object(
+                esoui_ram_index, "DEPENDENCY_DISK_CACHE_LOADED", False
+            ):
+                globals_map = esoui_ram_index.collect_dependency_globals(extract_dir, _extract_defined_lua_globals)
+                self.assertIn("LF_SMITHING_DECONSTRUCT", globals_map)
+                self.assertIn("LF_SMITHING_IMPROVEMENT", globals_map)
+                self.assertTrue(os.path.isfile(cache_file))
+
+                with open(lib_lua, "w", encoding="utf-8") as lf:
+                    lf.write(
+                        'local filterNames = { "LF_SMITHING_DECONSTRUCT", "LF_SMITHING_IMPROVEMENT", "LF_FENCE_SELL" }\n'
+                        'for i, name in ipairs(filterNames) do _G[name] = i end\n'
+                    )
+                globals_map_updated = esoui_ram_index.collect_dependency_globals(extract_dir, _extract_defined_lua_globals)
+                self.assertIn("LF_FENCE_SELL", globals_map_updated)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

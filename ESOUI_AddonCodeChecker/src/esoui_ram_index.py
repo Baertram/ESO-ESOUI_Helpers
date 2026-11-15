@@ -2,9 +2,12 @@
 In-Memory ESO-API-Indexierung, undocumented globals und Dependency-Globals-Resolver.
 """
 
+import hashlib
+import json
 import os
 import re
 from datetime import datetime
+
 
 from src.esoui_config import (
     C,
@@ -18,9 +21,67 @@ from src.esoui_config import (
 
 ESO_WORD_CACHE = {}
 DEPENDENCY_GLOBALS_CACHE = {}
+DEPENDENCY_DISK_CACHE_LOADED = False
+DEPENDENCY_CACHE_FILE = os.path.join("Cache", "dependency_globals_cache.json")
 ESOUI_RAM_DICTIONARY = {}
 ESOUI_UNDOCUMENTED_SET = set()
 ESOUI_INDEX_BUILT = False
+
+
+def _compute_dir_fingerprint(dir_path):
+    """Computes a fast SHA-256 fingerprint over all relative file paths, sizes, and mtimes in dir_path."""
+    if not os.path.isdir(dir_path):
+        return None
+    hasher = hashlib.sha256()
+    entries = []
+    for root, dirs, files in os.walk(dir_path):
+        dirs.sort()
+        for fn in sorted(files):
+            full_p = os.path.join(root, fn)
+            rel_p = os.path.relpath(full_p, dir_path).replace("\\", "/")
+            try:
+                st = os.stat(full_p)
+                entries.append(f"{rel_p}|{st.st_size}|{st.st_mtime_ns}")
+            except OSError:
+                entries.append(f"{rel_p}|0|0")
+    hasher.update("\n".join(entries).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _load_dependency_disk_cache(cache_path=DEPENDENCY_CACHE_FILE):
+    """Loads persisted per-addon dependency globals from Cache/dependency_globals_cache.json."""
+    global DEPENDENCY_DISK_CACHE_LOADED
+    if DEPENDENCY_DISK_CACHE_LOADED:
+        return
+    DEPENDENCY_DISK_CACHE_LOADED = True
+    if not os.path.isfile(cache_path):
+        return
+    try:
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            for dep_name, entry in data.items():
+                if isinstance(entry, dict) and isinstance(entry.get("globals"), dict):
+                    DEPENDENCY_GLOBALS_CACHE[dep_name] = {
+                        "hash": entry.get("hash"),
+                        "globals": entry["globals"],
+                    }
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _save_dependency_disk_cache(cache_path=DEPENDENCY_CACHE_FILE):
+    """Atomically persists DEPENDENCY_GLOBALS_CACHE to Cache/dependency_globals_cache.json."""
+    try:
+        parent = os.path.dirname(cache_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = cache_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(DEPENDENCY_GLOBALS_CACHE, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, cache_path)
+    except OSError:
+        pass
 
 
 def parse_undocumented_globals_lines(lines):
@@ -213,14 +274,24 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                     except Exception:
                         pass
 
+    _load_dependency_disk_cache()
     all_dep_globals = {}
+    cache_dirty = False
+
     for dep in dep_names:
-        if dep in DEPENDENCY_GLOBALS_CACHE:
-            all_dep_globals.update(DEPENDENCY_GLOBALS_CACHE[dep])
+        dep_dir = os.path.join(ESO_ADDONS_DIR, dep)
+        current_hash = _compute_dir_fingerprint(dep_dir)
+        cached_entry = DEPENDENCY_GLOBALS_CACHE.get(dep)
+
+        if (
+            isinstance(cached_entry, dict)
+            and cached_entry.get("hash") == current_hash
+            and isinstance(cached_entry.get("globals"), dict)
+        ):
+            all_dep_globals.update(cached_entry["globals"])
             continue
 
         dep_globals = {}
-        dep_dir = os.path.join(ESO_ADDONS_DIR, dep)
         manifest_path = None
         for ext in ('.addon', '.txt'):
             candidate = os.path.join(dep_dir, dep + ext)
@@ -243,6 +314,14 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                                 file_text = tf.read()
                             if target_file.lower().endswith('.lua'):
                                 dep_globals.update(extract_lua_globals_fn(file_text, rel_display))
+                                no_comments = re.sub(r'--\[\[.*?\]\]', lambda m: '\n' * m.group(0).count('\n'), file_text, flags=re.DOTALL)
+                                no_comments = re.sub(r'--.*$', '', no_comments, flags=re.MULTILINE)
+                                has_dyn_g = bool(re.search(r'\b_G\s*\[[^\]]+\]\s*=', no_comments))
+                                for sm in re.finditer(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']', no_comments):
+                                    s_ident = sm.group(1)
+                                    if s_ident not in dep_globals and (has_dyn_g or re.match(r'^[A-Z][A-Z0-9_]{2,}$', s_ident)):
+                                        line_no = no_comments.count('\n', 0, sm.start(1)) + 1
+                                        dep_globals[s_ident] = f"{rel_display}:{line_no}"
                             elif target_file.lower().endswith('.xml'):
                                 for xm in re.finditer(r'\bname\s*=\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']', file_text):
                                     g_name = xm.group(1)
@@ -252,7 +331,14 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
             except Exception:
                 pass
 
-        DEPENDENCY_GLOBALS_CACHE[dep] = dep_globals
+        DEPENDENCY_GLOBALS_CACHE[dep] = {
+            "hash": current_hash,
+            "globals": dep_globals,
+        }
+        cache_dirty = True
         all_dep_globals.update(dep_globals)
+
+    if cache_dirty:
+        _save_dependency_disk_cache()
 
     return all_dep_globals
