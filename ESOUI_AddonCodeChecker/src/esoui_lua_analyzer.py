@@ -148,6 +148,7 @@ def collect_addon_context(extract_dir):
     has_bindings_xml = False
     xml_combined_parts = []
     all_global_tables = set()
+    dynamic_globals = set()
     saved_variables = set()
     root_addon_manifests = []
     root_txt_manifests = []
@@ -189,7 +190,8 @@ def collect_addon_context(extract_dir):
                 elif lower_f.endswith(".lua"):
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as lf:
-                            lua_clean = strip_lua_comments_preserve_lines(lf.read())
+                            raw_lua_txt = lf.read()
+                        lua_clean = strip_lua_comments_preserve_lines(raw_lua_txt)
                         tbl_matches = re.findall(
                             r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{\}|\1\s*or\s*\{})',
                             lua_clean,
@@ -198,6 +200,11 @@ def collect_addon_context(extract_dir):
                         for m in tbl_matches:
                             if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', lua_clean):
                                 all_global_tables.add(m)
+                        # Register all top-level globals & dynamic _G[var] constants defined by the addon itself
+                        rel_f = os.path.relpath(full_path, extract_dir).replace("\\", "/")
+                        file_defined_globals = extract_globals_from_lua_source(raw_lua_txt, rel_f)
+                        dynamic_globals.update(file_defined_globals.keys())
+
                     except Exception:
                         pass
         for m_file in root_addon_manifests + root_txt_manifests:
@@ -217,6 +224,7 @@ def collect_addon_context(extract_dir):
         "has_bindings_xml": has_bindings_xml,
         "xml_content": "\n".join(xml_combined_parts),
         "all_global_tables": all_global_tables,
+        "dynamic_globals": dynamic_globals,
         "saved_variables": saved_variables,
         "root_addon_manifests": root_addon_manifests,
         "root_txt_manifests": root_txt_manifests,
@@ -350,11 +358,12 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
             )
 
 
-def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
+def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=None):
     """
     Detects global variable assignments (missing 'local') anywhere in a Lua file,
     accurately ignoring table constructor fields (including nested LAM menus like 'helpUrl = ...')
     while still catching global leaks inside table callbacks (e.g. 'setFunc = function() leak = 1 end').
+    Globals prefixed with '<GlobalAddonTable>_' (e.g. FCOIS_DEBUG_DEPTH_NORMAL) are routed to Best Practices.
     """
     if not is_index_built():
         build_esoui_index_once()
@@ -363,20 +372,23 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
     lines = code_only.splitlines()
     file_locals = _collect_lua_local_identifiers(code_only)
 
+    global_tables = set(addon_ctx.get("all_global_tables", set()))
+    table_prefixes = tuple(f"{gt}_" for gt in global_tables if gt)
+
     allowed_globals = (
-        set(addon_ctx.get("all_global_tables", set()))
+        global_tables
         | set(addon_ctx.get("saved_variables", set()))
         | set(ESOUI_RAM_DICTIONARY.keys())
         | ESOUI_UNDOCUMENTED_SET
         | LUA_STD_LIBS
     )
+
     lua_keywords = {
         "local", "function", "if", "end", "then", "return", "else", "elseif",
         "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
         "not", "while", "repeat", "until", "break", "do", "self", "_"
     }
 
-    # Stack tracking active construct: 'table' for '{ ... }' vs 'block' for 'function/if/for/while/do/repeat ... end/until'
     scope_stack = []
     token_rx = re.compile(
         r'(\{)|(\})|\b(function|if|for|while|repeat|do)\b|\b(end|until)\b|(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)'
@@ -401,7 +413,6 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
                 if scope_stack and scope_stack[-1] == "block":
                     scope_stack.pop()
             elif var_name and not is_local_stmt:
-                # Directly inside a table constructor (top of scope_stack is 'table') -> table field key, not a global
                 if scope_stack and scope_stack[-1] == "table":
                     continue
                 if var_name in lua_keywords or var_name in file_locals or var_name in allowed_globals:
@@ -409,10 +420,17 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues):
                 prefix = line[:m.start(5)].rstrip()
                 if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
                     continue
+                if stripped.endswith(","):
+                    continue
+
                 orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
-                lua_issues.append(
-                    f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
-                )
+                if table_prefixes and var_name.startswith(table_prefixes) and move_to_table_hits is not None:
+                    move_to_table_hits.append((idx, orig))
+                else:
+                    lua_issues.append(
+                        f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
+                    )
+
 
 
 def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx=None):
@@ -605,10 +623,11 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
 
 
 def extract_globals_from_lua_source(lua_code, rel_display_path):
-    """Extracts global identifiers with exact file path and line number from a dependency Lua file."""
+    """Extracts global identifiers (including dynamic _G[var] string table constants) from a Lua file."""
     exposed = {}
     clean_lua = strip_lua_comments_preserve_lines(lua_code)
     local_strings = dict(re.findall(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["\']([^"\']+)["\']', clean_lua))
+    has_dyn_g = bool(re.search(r'\b_G\s*\[[^\]]+\]\s*=', clean_lua))
 
     def _record(name, char_pos):
         if name not in exposed:
@@ -623,7 +642,15 @@ def extract_globals_from_lua_source(lua_code, rel_display_path):
     for m in re.finditer(r'_G\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*=', clean_lua):
         if m.group(1) in local_strings:
             _record(local_strings[m.group(1)], m.start(1))
+    for sm in re.finditer(r'["\']([A-Za-z_][A-Za-z0-9_]*)["\']', clean_lua):
+        s_ident = sm.group(1)
+        if has_dyn_g or re.match(r'^[A-Z][A-Z0-9_]{2,}$', s_ident):
+            _record(s_ident, sm.start(1))
+    if has_dyn_g:
+        for km in re.finditer(r'(?<![A-Za-z0-9_.:])\b([A-Z][A-Z0-9_]{2,})\b\s*=(?!=)', clean_lua):
+            _record(km.group(1), km.start(1))
     return exposed
+
 
 def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     """Runs all static checks on a single Lua source file and queues unverified globals for AI."""
@@ -641,11 +668,17 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     raw_lines = content.splitlines()
     clean_lines_list = comment_free_lua.splitlines()
 
+    move_to_table_hits = []
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
-    _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues)
+    _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=move_to_table_hits)
     lua_suggestions = _check_lua_global_tables_and_locals(
         comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues
     )
+    if move_to_table_hits:
+        formatted_mtt = "\n".join(f"    {ln}: --{orig}" for ln, orig in move_to_table_hits)
+        lua_suggestions.append(
+            "Move to your global addon table instead:\n" + formatted_mtt
+        )
 
     _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx)
     ai_slop_block = _check_lua_ai_slop_patterns(content, raw_lines)
@@ -667,7 +700,8 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         print(f"    └── {C.RED}See report for full line-by-line details.{C.RESET}")
         issues_str = "\n".join(["  - " + issue for issue in lua_issues])
         sugg_str = "\n".join(["  - " + s for s in lua_suggestions]) if lua_suggestions else "None"
-        return "[STATUS] FAIL\n[CRITICAL VIOLATIONS]\n" + issues_str + ai_slop_block + "\n[BEST PRACTICE SUGGESTIONS]\n" + sugg_str
+        return "[STATUS] FAIL\n[CRITICAL VIOLATIONS]\n" + issues_str + "\n[BEST PRACTICE SUGGESTIONS]\n" + sugg_str + ai_slop_block
+
 
     clean_code_for_words = strip_lua_strings_preserve_lines(comment_free_lua)
     flattened_content = re.sub(r'\s+', ' ', clean_code_for_words)
@@ -686,7 +720,8 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
 
     parts_or_stem = file_name.replace("\\", "/").split("/") if ("\\" in file_name or "/" in file_name) else os.path.splitext(file_name)
     addon_main_namespace = next(iter(parts_or_stem))
-    blessed_keywords = {str(addon_main_namespace)} | addon_ctx["all_global_tables"]
+    blessed_keywords = {str(addon_main_namespace)} | addon_ctx["all_global_tables"] | addon_ctx.get("dynamic_globals", set())
+
     candidate_unknowns = []
 
     cross_ref_start = datetime.now()
@@ -715,7 +750,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         if lua_suggestions:
             print(f"    ├── {C.WHITE}{len(lua_suggestions)}{C.CYAN} best practice suggestions added to report{C.RESET}")
             print(f"    └── {C.GREEN}[PASS]{C.RESET} Static check passed.")
-            return "[STATUS] PASS\n[CRITICAL VIOLATIONS] None" + ai_slop_block + "\n[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(["  - " + s for s in lua_suggestions])
+            return "[STATUS] PASS\n[CRITICAL VIOLATIONS] None\n[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(["  - " + s for s in lua_suggestions]) + ai_slop_block
         if ai_slop_block:
             print(f"    ├── {C.CYAN}Potential AI code hints added to report{C.RESET}")
         print(f"    └── {C.GREEN}[PASS]{C.RESET} Static check passed.")

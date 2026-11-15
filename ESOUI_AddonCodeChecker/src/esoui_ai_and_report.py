@@ -7,8 +7,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import zipfile
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import select
+
 from collections import defaultdict
 from datetime import datetime
 
@@ -585,8 +592,32 @@ def _split_large_lua_file_for_ai(rel_path, source_text, max_chars=14000):
     return result_parts
 
 
+def _poll_escape_key_pressed():
+    """Returns True if ESC was pressed in the terminal without blocking."""
+    try:
+        if os.name == "nt":
+            while msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                    continue
+                if ch == "\x1b":
+                    return True
+            return False
+        if sys.stdin and sys.stdin.isatty():
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                ch = sys.stdin.read(1)
+                if ch == "\x1b":
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def _run_ai_code_review(addon_code_bundle):
-    """Reviews queued files sequentially with Ollama and returns parsed AI findings [(rel_path, status, crit_lines, bp_lines)]."""
+    """Reviews queued files sequentially with Ollama and returns parsed AI findings [(rel_path, ai_response)]."""
     ai_findings = []
     if not addon_code_bundle:
         print(f"  {C.GREEN}✔ All files passed local pre-checks. Skipping AI review!{C.RESET}")
@@ -621,9 +652,17 @@ def _run_ai_code_review(addon_code_bundle):
             expanded_work_items.append((orig_rel_path, display_label, part_code))
 
     total_items = len(expanded_work_items)
-    print(f"\n  {C.BLUE}{C.BOLD}[AI REVIEW] Reviewing {total_items} item(s) with Ollama ({MODEL_NAME})...{C.RESET}")
+    print(
+        f"\n  {C.BLUE}{C.BOLD}[AI REVIEW] Reviewing {total_items} item(s) with Ollama ({MODEL_NAME}) "
+        f"{C.CYAN}(Press ESC anytime to abort AI review){C.BLUE}...{C.RESET}"
+    )
 
+    aborted_by_esc = False
     for idx, (orig_rel_path, display_label, part_code) in enumerate(expanded_work_items, 1):
+        if aborted_by_esc or _poll_escape_key_pressed():
+            print(f"  {C.YELLOW}⏹ AI review aborted by user (ESC). Finalizing report with static results...{C.RESET}")
+            break
+
         print(f"  {C.CYAN}[AI {idx}/{total_items}]{C.RESET} Reviewing {C.BOLD}{display_label}{C.RESET}...")
 
         review_payload = f"### START_FILE: {display_label}\n\n[SOURCE_CODE]\n{part_code}\n### END_FILE: {display_label}\n"
@@ -649,11 +688,21 @@ def _run_ai_code_review(addon_code_bundle):
         start_wait = time.perf_counter()
         try:
             while not future.done():
+                if _poll_escape_key_pressed():
+                    aborted_by_esc = True
+                    future.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
                 if int(time.perf_counter() - start_wait) >= AI_TIMEOUT_SECONDS:
                     future.cancel()
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise TimeoutError("AI review timed out")
-                time.sleep(0.5)
+                time.sleep(0.1)
+
+            if aborted_by_esc:
+                print(f"    └── {C.YELLOW}⏹ AI review aborted by user (ESC). Finalizing report with static results...{C.RESET}")
+                break
+
             response = future.result()
             executor.shutdown(wait=False)
             ai_response = response.get("response", "").strip()
@@ -664,6 +713,7 @@ def _run_ai_code_review(addon_code_bundle):
             print(f"    └── {C.YELLOW}⚠ AI fallback for {display_label}: {e}{C.RESET}")
 
     return ai_findings
+
 def _parse_findings_into_report_data(rel_path, category, raw_result, report_data):
     """Extracts critical violations and best-practice items from an analyzer result into grouped buckets."""
     rel_norm = rel_path.replace("\\", "/")
@@ -676,8 +726,12 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
         if s == "[BEST PRACTICE SUGGESTIONS]":
             section = "bp"
             continue
+        if s == "[REVIEW POTENTIAL AI CODE]":
+            section = "ai_slop"
+            continue
         if s.startswith("[STATUS]") or s == "None" or not s:
             continue
+
 
         if section == "crit" and s.startswith("- "):
             item_text = s[2:].strip()
@@ -724,6 +778,20 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 elif num_m:
                     ln_no, c_txt = num_m.group(1), num_m.group(2).strip()
                     report_data["best_practices"][report_data["_last_bp_rule"]].append((rel_norm, ln_no, c_txt))
+
+        elif section == "ai_slop":
+            if s.startswith("pcall usage:"):
+                report_data["_last_slop_rule"] = "Possible action: Potential AI code - defensive pcall() usage (verify if needed)"
+            elif s.startswith("Unnecessary 'exists' checks:"):
+                report_data["_last_slop_rule"] = "Possible action: Potential AI code - unnecessary existence check on documented ESO global"
+            elif s.startswith("- ") and report_data.get("_last_slop_rule"):
+                slop_item = s[2:].strip()
+                m_slop = re.match(r'^(\d+)(?:\s*\(([^)]+)\))?:\s*--\s*(.*)$', slop_item)
+                if m_slop:
+                    ln_no, ident_info, c_txt = m_slop.group(1), m_slop.group(2), m_slop.group(3).strip()
+                    loc_label = f"{rel_norm}:{ln_no} ({ident_info})" if ident_info else f"{rel_norm}:{ln_no}"
+                    report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
+
 
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
     """Writes the compact, grouped ESOUI BBCode report without any PASS noise."""

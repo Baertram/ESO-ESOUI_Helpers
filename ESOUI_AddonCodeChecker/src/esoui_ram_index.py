@@ -322,6 +322,12 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                                     if s_ident not in dep_globals and (has_dyn_g or re.match(r'^[A-Z][A-Z0-9_]{2,}$', s_ident)):
                                         line_no = no_comments.count('\n', 0, sm.start(1)) + 1
                                         dep_globals[s_ident] = f"{rel_display}:{line_no}"
+                                if has_dyn_g:
+                                    for km in re.finditer(r'(?<![A-Za-z0-9_.:])\b([A-Z][A-Z0-9_]{2,})\b\s*=(?!=)', no_comments):
+                                        k_ident = km.group(1)
+                                        if k_ident not in dep_globals:
+                                            line_no = no_comments.count('\n', 0, km.start(1)) + 1
+                                            dep_globals[k_ident] = f"{rel_display}:{line_no}"
                             elif target_file.lower().endswith('.xml'):
                                 for xm in re.finditer(r'\bname\s*=\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']', file_text):
                                     g_name = xm.group(1)
