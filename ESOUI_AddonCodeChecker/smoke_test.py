@@ -36,6 +36,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertIn("/downloads/info", esoui_config.ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX)
         self.assertIn("/downloads/dl", esoui_config.ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX)
         self.assertIn("showthread.php?t=10790", esoui_config.ESOUI_UPLOAD_RULES_URL)
+        self.assertIn("AddFilterForEvent#Filter_Types", esoui_config.ESOUI_WIKI_EVENT_FILTERS_URL)
 
     def test_02_download_io_parsers(self):
         from src.esoui_download_io import (
@@ -267,7 +268,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
 
     def test_06_dependency_globals_hash_cache(self):
         from src import esoui_ram_index
-        from src.esoui_lua_analyzer import _extract_defined_lua_globals
+        from src.esoui_lua_analyzer import extract_globals_from_lua_source
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             addons_dir = os.path.join(tmp_dir, "AddOns")
@@ -294,7 +295,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
             ), patch.object(esoui_ram_index, "DEPENDENCY_GLOBALS_CACHE", {}), patch.object(
                 esoui_ram_index, "DEPENDENCY_DISK_CACHE_LOADED", False
             ):
-                globals_map = esoui_ram_index.collect_dependency_globals(extract_dir, _extract_defined_lua_globals)
+                globals_map = esoui_ram_index.collect_dependency_globals(extract_dir, extract_globals_from_lua_source)
                 self.assertIn("LF_SMITHING_DECONSTRUCT", globals_map)
                 self.assertIn("LF_SMITHING_IMPROVEMENT", globals_map)
                 self.assertTrue(os.path.isfile(cache_file))
@@ -304,8 +305,93 @@ class TestEsouiModularSmoke(unittest.TestCase):
                         'local filterNames = { "LF_SMITHING_DECONSTRUCT", "LF_SMITHING_IMPROVEMENT", "LF_FENCE_SELL" }\n'
                         'for i, name in ipairs(filterNames) do _G[name] = i end\n'
                     )
-                globals_map_updated = esoui_ram_index.collect_dependency_globals(extract_dir, _extract_defined_lua_globals)
+                globals_map_updated = esoui_ram_index.collect_dependency_globals(extract_dir, extract_globals_from_lua_source)
                 self.assertIn("LF_FENCE_SELL", globals_map_updated)
+
+
+    def test_07_event_filters_and_dependency_repeated_globals(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file
+
+        esoui_ram_index.parse_event_signatures_from_api_doc([
+            "* EVENT_UNIT_CREATED (*string* _unitTag_)",
+            "* EVENT_INVENTORY_SINGLE_SLOT_UPDATE (*Bag* _bagId_, *integer* _slotIndex_, *bool* _isNewItem_, *ItemUISoundCategory* _itemSoundCategory_, *integer* _inventoryUpdateReason_, *integer* _stackCountChange_)",
+        ])
+
+        lua_src = (
+            "local NAME = 'ChillGiveaway'\n"
+            "local A = {}\n"
+            "function A.Init()\n"
+            "    LibAddonMenu2:RegisterAddonPanel('P', {})\n"
+            "    LibAddonMenu2:RegisterOptionControls('P', {})\n"
+            "    EVENT_MANAGER:RegisterForEvent(NAME, EVENT_INVENTORY_SINGLE_SLOT_UPDATE, function(_, bag)\n"
+            "        if bag == BAG_BACKPACK then A.Refresh() end\n"
+            "    end)\n"
+            "    EVENT_MANAGER:RegisterForEvent(NAME, EVENT_UNIT_CREATED, function(_, unitTag)\n"
+            "        if unitTag == 'player' then A.Refresh() end\n"
+            "    end)\n"
+            "end\n"
+        )
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": set(),
+            "dynamic_globals": set(),
+            "saved_variables": set(),
+            "root_addon_manifests": ["ChillGiveaway.txt"],
+            "root_txt_manifests": [],
+        }
+        dep_stub = {"LibAddonMenu2": "/live/AddOns/LibAddonMenu-2.0/LibAddonMenu-2.0.lua:1"}
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+        ), patch(
+            "src.esoui_lua_analyzer.collect_dependency_globals", return_value=dep_stub
+        ):
+            res = analyze_lua_file("ChillGiveaway/ChillGiveaway.lua", lua_src, ".", ctx)
+        self.assertIn("Use event filters for inventory items instead of checking code slower in lua: EVENT_INVENTORY_SINGLE_SLOT_UPDATE", res)
+        self.assertIn("Use event filters for unit tags instead of checking code slower in lua: EVENT_UNIT_CREATED", res)
+        self.assertIn("Global 'LibAddonMenu2' is used 2 times in this file without a local reference", res)
+
+    def test_08_wiki_event_filter_html_parser_and_session_sync(self):
+        from src import esoui_lua_analyzer
+
+        sample_html = (
+            "<table>"
+            "<tr><th>filterType</th><th>eventNames (examples)</th></tr>"
+            "<tr><td>REGISTER_FILTER_BAG_ID</td><td>EVENT_INVENTORY_SINGLE_SLOT_UPDATE</td></tr>"
+            "<tr><td>REGISTER_FILTER_CUSTOM_TEST</td><td>EVENT_NEW_WIKI_TEST_EVENT</td></tr>"
+            "<tr><td>REGISTER_FILTER_INVALID</td><td>EVENT_SHOULD_BE_IGNORED</td></tr>"
+            "</table>"
+        )
+        parsed = esoui_lua_analyzer._parse_wiki_event_filter_html(sample_html)
+        self.assertEqual(parsed["EVENT_INVENTORY_SINGLE_SLOT_UPDATE"], ["REGISTER_FILTER_BAG_ID"])
+        self.assertEqual(parsed["EVENT_NEW_WIKI_TEST_EVENT"], ["REGISTER_FILTER_CUSTOM_TEST"])
+        self.assertNotIn("EVENT_SHOULD_BE_IGNORED", parsed)
+
+        class _FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return sample_html.encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_json = os.path.join(tmp_dir, "wiki_event_filters_cache.json")
+            with patch.object(esoui_lua_analyzer, "_WIKI_EVENT_FILTER_SESSION_LOADED", False), patch.object(
+                esoui_lua_analyzer, "_WIKI_DYNAMIC_EVENT_RULES", {}
+            ), patch.object(esoui_lua_analyzer, "WIKI_EVENT_FILTERS_CACHE_FILE", cache_json), patch(
+                "urllib.request.urlopen", return_value=_FakeResp()
+            ) as mock_open:
+                filters_1, title_1 = esoui_lua_analyzer._get_event_filter_spec("EVENT_NEW_WIKI_TEST_EVENT")
+                filters_2, _ = esoui_lua_analyzer._get_event_filter_spec("EVENT_NEW_WIKI_TEST_EVENT")
+                self.assertEqual(mock_open.call_count, 1)
+                self.assertEqual(filters_1, {"REGISTER_FILTER_CUSTOM_TEST"})
+                self.assertEqual(filters_2, {"REGISTER_FILTER_CUSTOM_TEST"})
+                self.assertIn("new wiki test event", title_1)
+                self.assertTrue(os.path.isfile(cache_json))
 
 
 if __name__ == "__main__":
