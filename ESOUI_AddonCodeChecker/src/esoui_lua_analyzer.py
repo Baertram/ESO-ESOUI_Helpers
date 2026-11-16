@@ -324,55 +324,25 @@ def _parse_wiki_lgb_ids_html(html_text):
 
 
 def _parse_wiki_lgb_ids_wikitext(wikitext):
-    """Parst MediaWiki-Wikitext von LibGroupBroadcast_IDs (inkl. colspan-Reservierungen, 3-Spalten-Zeilen und ID-Ranges)."""
+    """Parst MediaWiki-Wikitext von LibGroupBroadcast_IDs zeilenweise (CRLF-sicher, inkl. colspan & ID-Ranges)."""
     protocols = {}
     events = {}
     current_kind = None
-    rows = re.split(r"^\|\-\s*.*$", wikitext, flags=re.MULTILINE)
+    cells = []
 
     def _pick_addon_from_cells(cell_list):
-        c3 = cell_list[3] if len(cell_list) >= 4 else ""
-        c1 = cell_list[1] if len(cell_list) >= 2 else ""
+        c3 = next(iter(cell_list[3:4]), "")
+        c1 = next(iter(cell_list[1:2]), "")
         if c3 and c3 != "-" and c3.lower() != "work in progress":
             return c3
         if c1 and c1 != "-":
             return c1
         return ""
 
-    for block in rows:
-        for hm in re.finditer(r"^==+\s*([^=]+?)\s*==+", block, flags=re.MULTILINE):
-            h_low = hm.group(1).strip().lower()
-            if "handler" in h_low:
-                current_kind = None
-            elif "protocol" in h_low:
-                current_kind = "protocols"
-            elif "event" in h_low:
-                current_kind = "events"
-
-        if current_kind not in ("protocols", "events"):
-            continue
-
-        cells = []
-        for raw_ln in block.splitlines():
-            s = raw_ln.strip()
-            if not s.startswith("|") or s.startswith("|}") or s.startswith("{|"):
-                continue
-            row_body = s[1:]
-            for part in row_body.split("||"):
-                if "|" in part and re.match(r"^\s*(?:colspan|rowspan|style|class|align)\b", part, flags=re.IGNORECASE):
-                    part = part.split("|", 1)[-1]
-                clean_cell = re.sub(r"'{2,}", "", part)
-                clean_cell = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", clean_cell)
-                clean_cell = re.sub(r"\[\[([^\]]+)\]\]", r"\1", clean_cell)
-                clean_cell = re.sub(r"<[^>]+>", " ", clean_cell)
-                clean_cell = re.sub(r"\s+", " ", clean_cell).strip()
-                cells.append(clean_cell)
-
-        if not cells:
-            continue
-
-        col0 = cells[0]
-
+    def _flush_row(row_cells, kind):
+        if not row_cells or kind not in ("protocols", "events"):
+            return
+        col0 = next(iter(row_cells), "")
         id_range = []
         addon_info = ""
 
@@ -382,12 +352,12 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
 
         if col0.isdigit():
             id_range = [int(col0)]
-            addon_info = _pick_addon_from_cells(cells)
+            addon_info = _pick_addon_from_cells(row_cells)
         elif range_col0_m:
             lo, hi = int(range_col0_m.group(1)), int(range_col0_m.group(2))
             if 0 <= lo <= hi <= 2048:
                 id_range = list(range(lo, hi + 1))
-            addon_info = _pick_addon_from_cells(cells)
+            addon_info = _pick_addon_from_cells(row_cells)
         elif inline_range_m:
             lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
             if 0 <= lo <= hi <= 2048:
@@ -398,16 +368,55 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
             addon_info = inline_single_m.group(2).strip()
 
         if not id_range or not addon_info or addon_info == "-":
-            continue
+            return
 
-        target_map = events if current_kind == "events" else protocols
+        target_map = events if kind == "events" else protocols
         for nid in id_range:
             target_map[nid] = addon_info
 
+    for raw_ln in wikitext.splitlines():
+        s = raw_ln.strip()
+        if not s:
+            continue
+        hm = re.match(r"^==+\s*([^=]+?)\s*==+", s)
+        if hm:
+            _flush_row(cells, current_kind)
+            cells = []
+            h_low = hm.group(1).strip().lower()
+            if "handler" in h_low:
+                current_kind = None
+            elif "protocol" in h_low:
+                current_kind = "protocols"
+            elif "event" in h_low:
+                current_kind = "events"
+            continue
+
+        if s.startswith("|-") or s.startswith("|}") or s.startswith("{|"):
+            _flush_row(cells, current_kind)
+            cells = []
+            continue
+
+        if current_kind not in ("protocols", "events") or not s.startswith("|"):
+            continue
+
+        row_body = s[1:]
+        for part in row_body.split("||"):
+            if "|" in part and re.match(r"^\s*(?:colspan|rowspan|style|class|align)\b", part, flags=re.IGNORECASE):
+                part = part.split("|", 1)[-1]
+            clean_cell = re.sub(r"'{2,}", "", part)
+            clean_cell = re.sub(r"\[\[[^|\]]+\|([^\]]+)\]\]", r"\1", clean_cell)
+            clean_cell = re.sub(r"\[\[([^\]]+)\]\]", r"\1", clean_cell)
+            clean_cell = re.sub(r"<[^>]+>", " ", clean_cell)
+            clean_cell = re.sub(r"\s+", " ", clean_cell).strip()
+            cells.append(clean_cell)
+
+    _flush_row(cells, current_kind)
     return {"protocols": protocols, "events": events}
 
 
+
 def _parse_wiki_lgb_ids_plain_table(raw_text):
+
     """Parst kopierte Wiki-Tabellen (Tab-getrennt oder '200 reserved for ...') als Fallback."""
     protocols = {}
     events = {}
