@@ -331,8 +331,8 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
     rows = re.split(r"^\|\-\s*.*$", wikitext, flags=re.MULTILINE)
 
     def _pick_addon_from_cells(cell_list):
-        c3 = cell_list if len(cell_list) >= 4 else ""
-        c1 = cell_list if len(cell_list) >= 2 else ""
+        c3 = cell_list[3] if len(cell_list) >= 4 else ""
+        c1 = cell_list[1] if len(cell_list) >= 2 else ""
         if c3 and c3 != "-" and c3.lower() != "work in progress":
             return c3
         if c1 and c1 != "-":
@@ -371,7 +371,8 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
         if not cells:
             continue
 
-        col0 = cells
+        col0 = cells[0]
+
         id_range = []
         addon_info = ""
 
