@@ -1193,11 +1193,16 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                 for var_name in sorted(filtered_grouped_globals.keys(), key=lambda x: x.lower()):
                     for f_path, hits_list in filtered_grouped_globals[var_name].items():
                         per_file_vars[f_path].append(f"{var_name} (x{len(hits_list)})")
+                spoiler_lines = []
                 for f_path in sorted(per_file_vars.keys(), key=lambda x: x.lower()):
                     var_list = per_file_vars[f_path]
-                    out.append(
-                        f'{lb}*{rb} {lb}b{rb}{f_path}{lb}/b{rb} ({len(var_list)} globals): {", ".join(var_list)}'
+                    spoiler_lines.append(
+                        f'{lb}b{rb}{f_path}{lb}/b{rb} ({len(var_list)} globals): {", ".join(var_list)}'
                     )
+                out.append(
+                    f'{lb}*{rb} {len(per_file_vars)} file(s) affected '
+                    f'{lb}spoiler{rb}{lb}SIZE="2"{rb}' + "\n".join(spoiler_lines) + f'{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                )
 
             elif int(compact_bp) == 2:
                 per_file_vars = defaultdict(list)
