@@ -506,6 +506,5 @@ def annotate_depends_on_line(
         else:
             annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
 
-
     return f"{header.strip()}: {' '.join(annotated_tokens)}", has_missing, has_outdated
 

@@ -992,9 +992,19 @@ def _harmonize_xsd_message(raw_msg):
     return " | ".join(harmonized_parts)
 
 
+def _strip_addon_root_prefix(path_str):
+    """Strips the leading top-level addon folder and formats the relative path with leading '\\'."""
+    if not path_str:
+        return ""
+    norm = str(path_str).replace("/", "\\").lstrip("\\")
+    if "\\" in norm:
+        _, sub_path = norm.split("\\", 1)
+        return "\\" + sub_path
+    return "\\" + norm
+
+
 def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0, errors_only_tree=False):
     """Builds the ESOUI BBCode report text with progressive compaction levels."""
-
 
     lb, rb = chr(91), chr(93)
     out = [
@@ -1059,7 +1069,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                 out.append("Missing local definition? Else: Please define only 1 global table for your addon, and add all relevant functions/tables/controls/variables to it")
                 by_file = defaultdict(list)
                 for f_path, ln_no, var_name, code_txt in pollution_entries:
-                    by_file[f_path].append((int(ln_no), var_name, code_txt))
+                    by_file[_strip_addon_root_prefix(f_path)].append((int(ln_no), var_name, code_txt))
                 spoiler_lines = []
                 for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
                     spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
@@ -1075,7 +1085,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                     grouped_xsd_entries = defaultdict(list)
                     for f_path, ln_no, code_txt in entries:
                         clean_xsd = _harmonize_xsd_message(code_txt)
-                        grouped_xsd_entries[(f_path, clean_xsd)].append(ln_no)
+                        grouped_xsd_entries[(_strip_addon_root_prefix(f_path), clean_xsd)].append(ln_no)
                     for (f_path, clean_xsd), line_list in grouped_xsd_entries.items():
                         valid_lines = []
                         for ln in line_list:
@@ -1093,14 +1103,16 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                     for f_path, ln_no, code_txt in entries:
                         if f_path.startswith("EVENT_FILTER::"):
                             _, ev_name, real_file = f_path.split("::", 2)
-                            header_loc = f"{real_file}:{ln_no}" if ln_no else real_file
+                            short_real = _strip_addon_root_prefix(real_file)
+                            header_loc = f"{short_real}:{ln_no}" if ln_no else short_real
                             spoiler_body = f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}\n{code_txt}"
                             out.append(
                                 f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
                                 f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
                             )
                         else:
-                            loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                            short_fp = _strip_addon_root_prefix(f_path)
+                            loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
                             spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
                             out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
@@ -1116,7 +1128,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                     key=lambda item: (0 if item[2].startswith("Protocol") else 1, item[0].lower(), item[1]),
                 )
                 for f_path, ln_no, desc_txt in sorted_lgb:
-                    out.append(f"{lb}*{rb} {f_path}:{ln_no} - {desc_txt}")
+                    out.append(f"{lb}*{rb} {_strip_addon_root_prefix(f_path)}:{ln_no} - {desc_txt}")
                 out.append(f"{lb}/list{rb}")
                 out.append("Read the LibGroupBroadcast addon description and add your protocolls/events etc. properly to the ESOUI Wiki!")
 
@@ -1128,7 +1140,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         out.append(f"{lb}list{rb}")
         for f_path, code_txt in unverified_entries:
             spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
-            out.append(f"{lb}*{rb} {f_path}{spoiler_part}")
+            out.append(f"{lb}*{rb} {_strip_addon_root_prefix(f_path)}{spoiler_part}")
         out.append(f"{lb}/list{rb}")
 
     if has_bp:
@@ -1143,7 +1155,8 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             out.append("Please verify via the ## AddOnVersion: tags of the actual zip files of your specified dependencies.")
             out.append(f"{lb}list{rb}")
             for f_path, ln_no, code_txt in outdated_entries:
-                loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                short_fp = _strip_addon_root_prefix(f_path)
+                loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
                 spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
                 out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             out.append(f"{lb}/list{rb}")
@@ -1153,11 +1166,12 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         for var_name, files_dict in grouped_globals.items():
             for f_path, hits_list in files_dict.items():
                 if len(hits_list) > 1:
-                    filtered_grouped_globals[var_name][f_path] = hits_list
+                    filtered_grouped_globals[var_name][_strip_addon_root_prefix(f_path)] = hits_list
 
         if filtered_grouped_globals:
+            out.append("")
             out.append(
-                f"{lb}*{rb} {lb}b{rb}Global variable used multiple times w/o a local reference{lb}/b{rb}"
+                f"{lb}u{rb}Global variable used multiple times w/o a local reference{lb}/u{rb}"
             )
             out.append(f"{lb}list{rb}")
             if int(compact_bp) >= 4:
@@ -1230,7 +1244,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             if compact_bp and len(entries) > 1:
                 by_file = defaultdict(list)
                 for f_path, ln_no, code_txt in entries:
-                    by_file[f_path].append((ln_no, code_txt))
+                    by_file[_strip_addon_root_prefix(f_path)].append((ln_no, code_txt))
                 for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
                     f_hits = by_file[f_path]
                     first_ln, first_code = f_hits[0]
@@ -1244,7 +1258,8 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                     out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             else:
                 for f_path, ln_no, code_txt in entries:
-                    loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                    short_fp = _strip_addon_root_prefix(f_path)
+                    loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
                     spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
                     out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             out.append(f"{lb}/list{rb}")
