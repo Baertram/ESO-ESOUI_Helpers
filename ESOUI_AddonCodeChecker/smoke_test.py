@@ -177,6 +177,8 @@ class TestEsouiModularSmoke(unittest.TestCase):
         sample_v4 = self._sample_v4_filelist()
         with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch.object(
             esoui_filelist_search, "get_filelist", return_value=sample_v4
+        ), patch(
+            "src.esoui_lua_analyzer.collect_dependency_globals", return_value={}
         ):
             ctx = {
                 "has_bindings_xml": False,
@@ -233,13 +235,13 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 _render_final_bbcode_report(tmp_path, "MyAddon.zip", "2026-11-15 02:35:00 AM", report_data)
                 with open(tmp_path, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
-                self.assertIn(":mad: MyAddon.addon [MANIFEST]", rendered)
-                self.assertIn(":mad: Core.lua", rendered)
+                self.assertIn("MyAddon.addon [MANIFEST]", rendered)
+                self.assertIn("Core.lua", rendered)
                 self.assertNotIn(":mad: Clean.lua", rendered)
-                self.assertIn("[b]next[/b] (x2)", rendered)
+                self.assertIn("[b]next[/b] (used 2 times without local reference)", rendered)
                 self.assertNotIn("[SIZE=\"2\"]-- ", rendered)
                 pos_outdated = rendered.find("Mandatory version check >= outdated - consider an update")
-                pos_next = rendered.find("Global variable used multiple times without a local reference")
+                pos_next = rendered.find("Global variable used multiple times w/o a local reference")
                 self.assertTrue(0 < pos_outdated < pos_next)
             finally:
                 if os.path.exists(tmp_path):
@@ -392,6 +394,129 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 self.assertEqual(filters_2, {"REGISTER_FILTER_CUSTOM_TEST"})
                 self.assertIn("new wiki test event", title_1)
                 self.assertTrue(os.path.isfile(cache_json))
+
+    def test_09_cached_dependency_resolution_and_pc_folder_filters(self):
+        import zipfile
+        from src import esoui_download_io, esoui_filelist_search, esoui_ram_index
+        from src.esoui_lua_analyzer import extract_globals_from_lua_source
+
+        sample_v4 = self._sample_v4_filelist() + [
+            {
+                "id": 928,
+                "title": "MasterMerchant",
+                "author": "sharlikran",
+                "version": "3.8.0",
+                "lastUpdate": 1791292000000,
+                "addonStatus": "Live",
+                "addons": [
+                    {"path": "MasterMerchant", "addOnVersion": "380", "apiVersion": "101051", "library": False},
+                    {"path": "MasterMerchant/Libs/LibGuildStore", "addOnVersion": "15", "apiVersion": "101051", "library": True},
+                ],
+                "library": False,
+            },
+            {
+                "id": 9987,
+                "title": "LibGuildStore",
+                "author": "sharlikran",
+                "version": "1.0.14",
+                "lastUpdate": 1770000000000,
+                "addonStatus": "Live",
+                "addons": [
+                    {"path": "LibGuildStore", "addOnVersion": "14", "apiVersion": "101050", "library": True},
+                ],
+                "library": True,
+            },
+        ]
+
+        # Embedded version 15 in MasterMerchant (928) must beat standalone version 14 (9987)
+        resolved_gs = esoui_filelist_search.resolve_dependency_online_package("LibGuildStore", filelist=sample_v4)
+        self.assertIsNotNone(resolved_gs)
+        self.assertEqual(resolved_gs["addon_id"], "928")
+        self.assertEqual(resolved_gs["sub_path"], "MasterMerchant/Libs/LibGuildStore")
+        self.assertEqual(resolved_gs["add_on_version"], 15)
+
+        # PCDependsOn is parsed, ConsoleDependsOn is ignored
+        deps, _ = esoui_ram_index.parse_manifest_dependencies(
+            "## PCDependsOn: LibFilters-3.0>=350\n## ConsoleDependsOn: LibConsoleOnly\n"
+        )
+        self.assertEqual(deps, ["LibFilters-3.0"])
+
+        # PC ignored subdirectories (case-insensitive) vs PC-only folder
+        self.assertTrue(esoui_ram_index._is_pc_ignored_rel_path("Console/ConsoleFile.lua"))
+        self.assertTrue(esoui_ram_index._is_pc_ignored_rel_path("XB1/XboxFile.lua"))
+        self.assertTrue(esoui_ram_index._is_pc_ignored_rel_path("Playstation/PsFile.lua"))
+        self.assertTrue(esoui_ram_index._is_pc_ignored_rel_path("Internal/DevFile.lua"))
+        self.assertTrue(esoui_ram_index._is_pc_ignored_rel_path("Future/NextFile.lua"))
+        self.assertFalse(esoui_ram_index._is_pc_ignored_rel_path("PC/LibForgottenAddons.lua"))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addons_dir = os.path.join(tmp_dir, "live", "AddOns")
+            old_lib_dir = os.path.join(addons_dir, "LibFilters-3.0")
+            cache_dir = os.path.join(tmp_dir, "Cache")
+            cache_addons_dir = os.path.join(cache_dir, "AddOns")
+            cache_extracted_dir = os.path.join(cache_addons_dir, "_extracted")
+            stale_dir = os.path.join(cache_extracted_dir, "LibFilters-3.0")
+            extract_dir = os.path.join(tmp_dir, "Extract", "CheckedAddon")
+            os.makedirs(old_lib_dir, exist_ok=True)
+            os.makedirs(stale_dir, exist_ok=True)
+            os.makedirs(extract_dir, exist_ok=True)
+
+            # Outdated local AddOnVersion 340 vs online 350
+            with open(os.path.join(old_lib_dir, "LibFilters-3.0.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: LibFilters-3.0\n## AddOnVersion: 340\nLibFilters-3.0.lua\n")
+            with open(os.path.join(old_lib_dir, "LibFilters-3.0.lua"), "w", encoding="utf-8") as lf:
+                lf.write("OLD_LOCAL_GLOBAL = true\n")
+
+            # Stale file that must be wiped before extracting new ZIP
+            stale_file = os.path.join(stale_dir, "ObsoleteOldFile.lua")
+            with open(stale_file, "w", encoding="utf-8") as sf:
+                sf.write("STALE_GLOBAL = true\n")
+
+            with open(os.path.join(extract_dir, "CheckedAddon.addon"), "w", encoding="utf-8") as amf:
+                amf.write("## Title: CheckedAddon\n## PCDependsOn: LibFilters-3.0>=350\n")
+
+            # Create fake downloaded ZIP with AddOnVersion 350, PC/LibForgottenAddons.lua, and Console/Ignored.lua
+            source_zip = os.path.join(tmp_dir, "LibFilters-3.0_350.zip")
+            with zipfile.ZipFile(source_zip, "w") as zf:
+                zf.writestr(
+                    "LibFilters-3.0/LibFilters-3.0.txt",
+                    "## Title: LibFilters-3.0\n## AddOnVersion: 350\nPC/LibForgottenAddons.lua\nConsole/Ignored.lua\n",
+                )
+                zf.writestr("LibFilters-3.0/PC/LibForgottenAddons.lua", "FRESH_CACHED_PC_GLOBAL = true\n")
+                zf.writestr("LibFilters-3.0/Console/Ignored.lua", "CONSOLE_ONLY_GLOBAL = true\n")
+
+            dl_calls = []
+
+            def _fake_download_zip(url, target_folder, force_download=False):
+                dl_calls.append(url)
+                os.makedirs(target_folder, exist_ok=True)
+                dest = os.path.join(target_folder, "LibFilters-3.0.zip")
+                with open(source_zip, "rb") as src_f, open(dest, "wb") as dst_f:
+                    dst_f.write(src_f.read())
+                return dest, "LibFilters-3.0.zip"
+
+            cache_file = os.path.join(cache_dir, "dependency_globals_cache.json")
+            with patch.object(esoui_ram_index, "ESO_ADDONS_DIR", addons_dir), patch.object(
+                esoui_ram_index, "CACHE_ADDONS_DIR", cache_addons_dir
+            ), patch.object(esoui_ram_index, "CACHE_ADDONS_EXTRACTED_DIR", cache_extracted_dir), patch.object(
+                esoui_ram_index, "DEPENDENCY_CACHE_FILE", cache_file
+            ), patch.object(esoui_ram_index, "DEPENDENCY_GLOBALS_CACHE", {}), patch.object(
+                esoui_ram_index, "DEPENDENCY_DISK_CACHE_LOADED", False
+            ), patch.object(esoui_ram_index, "LOCAL_ADDONS_MANIFEST_INDEX", None), patch.object(
+                esoui_filelist_search, "get_filelist", return_value=sample_v4
+            ), patch.object(esoui_download_io, "download_zip", side_effect=_fake_download_zip):
+                g1 = esoui_ram_index.collect_dependency_globals(extract_dir, extract_globals_from_lua_source)
+                self.assertEqual(len(dl_calls), 1)
+                self.assertFalse(os.path.exists(stale_file))
+                self.assertIn("FRESH_CACHED_PC_GLOBAL", g1)
+                self.assertNotIn("OLD_LOCAL_GLOBAL", g1)
+                self.assertNotIn("CONSOLE_ONLY_GLOBAL", g1)
+
+                # Second run must reuse Cache/AddOns/_extracted without re-downloading
+                esoui_ram_index.reset_dependency_globals_cache()
+                g2 = esoui_ram_index.collect_dependency_globals(extract_dir, extract_globals_from_lua_source)
+                self.assertEqual(len(dl_calls), 1)
+                self.assertIn("FRESH_CACHED_PC_GLOBAL", g2)
 
 
 if __name__ == "__main__":

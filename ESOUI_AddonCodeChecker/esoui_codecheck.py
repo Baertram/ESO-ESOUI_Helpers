@@ -110,7 +110,7 @@ def main_cli():
     print(f"  - {C.WHITE}Latest Addons{C.RESET}   : [force] last <1..{ESOUI_LATEST_MAX_ITEMS}> (e.g. last 2-5, force last 1, 3, 7)")
     print(f"  - {C.WHITE}Search Addons{C.RESET}   : [force] search <q1, q2> | search dep <d1, d2> | search author <a1, a2> | search api <v1, !v2>")
     print(f"  - {C.WHITE}Repeat Last{C.RESET}     : [force] repeat | repeat dl | repeat search")
-    print(f"  - {C.WHITE}Cleanup{C.RESET}         : clear cache | clear zips [YYMMDD] | clear reports [YYMMDD]")
+    print(f"  - {C.WHITE}Cleanup{C.RESET}         : clear cache | clear cache addons | clear zips [YYMMDD] | clear reports [YYMMDD]")
     print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop a .zip archive or a .txt batch list\n")
     os.makedirs(BASE_FOLDER, exist_ok=True)
 
