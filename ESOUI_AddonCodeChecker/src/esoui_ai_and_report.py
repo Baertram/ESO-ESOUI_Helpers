@@ -877,8 +877,124 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                     report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
 
 
+def _harmonize_xsd_message(raw_msg):
+    """Generically compresses and groups all repetitive libxml2 XSD error strings per XML element."""
+    if not raw_msg:
+        return ""
+    parts = [p.strip() for p in raw_msg.split("|") if p.strip()]
+    elem_buckets = defaultdict(lambda: defaultdict(list))
+    elem_order = []
+    unparsed = []
+
+    rx_elem_attr = re.compile(r"^Element '([^']+)', attribute '([^']+)':\s*(.+)$")
+    rx_elem_only = re.compile(r"^Element '([^']+)':\s*(.+)$")
+    rx_unexpected_child = re.compile(
+        r"^Element '([^']+)': This element is not expected\.(?:\s*Expected is (?:one of )?\(\s*(.+?)\s*\)\.)?$"
+    )
+    rx_missing_child = re.compile(
+        r"^Missing child element\(s\)\.(?:\s*Expected is (?:one of )?\(\s*(.+?)\s*\)\.)?$"
+    )
+    rx_facet_enum = re.compile(
+        r"^\[facet 'enumeration'\] The value '([^']+)' is not an element of the set \{(.+?)\}\.$"
+    )
+    rx_atomic_type = re.compile(
+        r"^'([^']+)' is not a valid value of the atomic type '([^']+)'\.$"
+    )
+
+    def _register_elem(el):
+        if el not in elem_order:
+            elem_order.append(el)
+
+    def _append_unique(lst, val):
+        if val and val not in lst:
+            lst.append(val)
+
+    def _format_expected_list(raw_exp):
+        tokens = [t.strip().strip("'\"") for t in re.split(r"[,|]", raw_exp or "") if t.strip()]
+        return ", ".join(f"'{t}'" for t in dict.fromkeys(tokens))
+
+    for part in parts:
+        m_ea = rx_elem_attr.match(part)
+        if m_ea:
+            elem, attr, detail = m_ea.groups()
+            _register_elem(elem)
+            if detail == f"The attribute '{attr}' is not allowed.":
+                _append_unique(elem_buckets[elem]["not_allowed"], attr)
+            elif detail == f"The attribute '{attr}' is required but missing.":
+                _append_unique(elem_buckets[elem]["missing_req"], attr)
+            else:
+                m_enum = rx_facet_enum.match(detail)
+                m_atom = rx_atomic_type.match(detail)
+                if m_enum:
+                    bad_val, allowed_set = m_enum.groups()
+                    allowed_fmt = _format_expected_list(allowed_set)
+                    clean_det = f"attribute '{attr}': Invalid value '{bad_val}' (must be one of {allowed_fmt})."
+                elif m_atom:
+                    bad_val, type_name = m_atom.groups()
+                    clean_det = f"attribute '{attr}': Invalid value '{bad_val}' (expected type '{type_name}')."
+                else:
+                    clean_det = f"attribute '{attr}': {detail}"
+                _append_unique(elem_buckets[elem]["other"], clean_det)
+            continue
+
+        m_eo = rx_elem_only.match(part)
+        if m_eo:
+            elem, detail = m_eo.groups()
+            _register_elem(elem)
+            m_uc = rx_unexpected_child.match(detail)
+            m_mc = rx_missing_child.match(detail)
+            if m_uc:
+                bad_child, exp_raw = m_uc.groups()
+                _append_unique(elem_buckets[elem]["unexpected_children"], bad_child)
+                if exp_raw:
+                    elem_buckets[elem]["unexpected_expected"] = [_format_expected_list(exp_raw)]
+            elif m_mc:
+                exp_raw = m_mc.group(1)
+                exp_fmt = _format_expected_list(exp_raw) if exp_raw else ""
+                msg_mc = f"Missing child element(s) (expected {exp_fmt})." if exp_fmt else "Missing child element(s)."
+                _append_unique(elem_buckets[elem]["other"], msg_mc)
+            else:
+                _append_unique(elem_buckets[elem]["other"], detail)
+            continue
+
+        _append_unique(unparsed, part)
+
+    harmonized_parts = []
+    for el in elem_order:
+        b = elem_buckets[el]
+        sub_msgs = []
+
+        na = b.get("not_allowed", [])
+        if len(na) == 1:
+            sub_msgs.append(f"Attribute '{na[0]}' is not allowed.")
+        elif len(na) > 1:
+            sub_msgs.append(f"Attributes {', '.join(f'{chr(39)}{a}{chr(39)}' for a in na)} are not allowed.")
+
+        mr = b.get("missing_req", [])
+        if len(mr) == 1:
+            sub_msgs.append(f"Required attribute '{mr[0]}' is missing.")
+        elif len(mr) > 1:
+            sub_msgs.append(f"Required attributes {', '.join(f'{chr(39)}{a}{chr(39)}' for a in mr)} are missing.")
+
+        uc = b.get("unexpected_children", [])
+        if uc:
+            uc_joined = ", ".join(f"'{c}'" for c in uc)
+            exp_list = b.get("unexpected_expected", [])
+            exp_suffix = f" (expected {exp_list[0]})" if exp_list and exp_list[0] else ""
+            sub_msgs.append(f"Unexpected child element(s) {uc_joined}{exp_suffix}.")
+
+        for rest in b.get("other", []):
+            sub_msgs.append(rest)
+
+        harmonized_parts.append(f"Element '{el}': {' '.join(sub_msgs)}")
+
+    harmonized_parts.extend(unparsed)
+    return " | ".join(harmonized_parts)
+
+
 def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0, errors_only_tree=False):
     """Builds the ESOUI BBCode report text with progressive compaction levels."""
+
 
     lb, rb = chr(91), chr(93)
     out = [
@@ -955,19 +1071,38 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             for rule_title, entries in rules_map.items():
                 out.append(f"{lb}u{rb}{rule_title}{lb}/u{rb}")
                 out.append(f"{lb}list{rb}")
-                for f_path, ln_no, code_txt in entries:
-                    if f_path.startswith("EVENT_FILTER::"):
-                        _, ev_name, real_file = f_path.split("::", 2)
-                        header_loc = f"{real_file}:{ln_no}" if ln_no else real_file
-                        spoiler_body = f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}\n{code_txt}"
-                        out.append(
-                            f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
-                            f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
-                        )
-                    else:
-                        loc = f"{f_path}:{ln_no}" if ln_no else f_path
-                        spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                if rule_title == "XSD Validation Error":
+                    grouped_xsd_entries = defaultdict(list)
+                    for f_path, ln_no, code_txt in entries:
+                        clean_xsd = _harmonize_xsd_message(code_txt)
+                        grouped_xsd_entries[(f_path, clean_xsd)].append(ln_no)
+                    for (f_path, clean_xsd), line_list in grouped_xsd_entries.items():
+                        valid_lines = []
+                        for ln in line_list:
+                            if ln and ln not in valid_lines:
+                                valid_lines.append(ln)
+                        if len(valid_lines) > 1:
+                            loc = f"{f_path} (lines {', '.join(valid_lines)})"
+                        elif len(valid_lines) == 1:
+                            loc = f"{f_path}:{valid_lines[0]}"
+                        else:
+                            loc = f_path
+                        spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{clean_xsd}{lb}/SIZE{rb}{lb}/spoiler{rb}' if clean_xsd else ""
                         out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+                else:
+                    for f_path, ln_no, code_txt in entries:
+                        if f_path.startswith("EVENT_FILTER::"):
+                            _, ev_name, real_file = f_path.split("::", 2)
+                            header_loc = f"{real_file}:{ln_no}" if ln_no else real_file
+                            spoiler_body = f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}\n{code_txt}"
+                            out.append(
+                                f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
+                                f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                            )
+                        else:
+                            loc = f"{f_path}:{ln_no}" if ln_no else f_path
+                            spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                            out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
 
             if has_cat_lgb:
@@ -1022,8 +1157,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
         if filtered_grouped_globals:
             out.append(
-                f"{lb}*{rb} {lb}b{rb}Global variable used multiple times without a local reference{lb}/b{rb} "
-                f"(cache in a local variable for faster lookup):"
+                f"{lb}*{rb} {lb}b{rb}Global variable used multiple times w/o a local reference{lb}/b{rb}"
             )
             out.append(f"{lb}list{rb}")
             if int(compact_bp) >= 3:

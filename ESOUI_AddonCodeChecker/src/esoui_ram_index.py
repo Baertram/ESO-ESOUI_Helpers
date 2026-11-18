@@ -137,7 +137,7 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
         is_closing, tag_name, attrs, is_self_closing = m.groups()
         if is_closing:
             for i in range(len(tag_stack) - 1, -1, -1):
-                if tag_stack[i].lower() == tag_name.lower():
+                if tag_stack[i][0].lower() == tag_name.lower():
                     del tag_stack[i:]
                     break
             continue

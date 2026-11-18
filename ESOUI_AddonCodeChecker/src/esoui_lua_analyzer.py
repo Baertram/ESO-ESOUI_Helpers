@@ -789,9 +789,12 @@ def collect_addon_context(extract_dir):
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as xf:
                             raw_xml = xf.read()
-                        xml_combined_parts.append(re.sub(r'<!--.*?-->', '', raw_xml, flags=re.DOTALL))
-                        for ctrl_name, _ in extract_resolved_xml_control_names(raw_xml):
+                        clean_xml = re.sub(r'<!--.*?-->', '', raw_xml, flags=re.DOTALL)
+                        xml_combined_parts.append(clean_xml)
+                        for ctrl_name, _ in extract_resolved_xml_control_names(clean_xml):
                             dynamic_globals.add(ctrl_name)
+                        for m_ctrl in re.finditer(r'\bname\s*=\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']', clean_xml):
+                            dynamic_globals.add(m_ctrl.group(1))
                     except Exception:
                         pass
                 elif lower_f.endswith(".lua"):
