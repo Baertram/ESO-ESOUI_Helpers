@@ -244,9 +244,18 @@ def analyze_xml_file(file_name, content, addon_ctx):
             validator = _get_xml_schema_validator(schema_setting)
             if validator is not None:
                 if not validator.validate(doc):
+                    grouped_xsd = {}
                     for err in validator.error_log:
-                        xml_issues.append(f"XSD Validation Error (line {err.line}): {err.message}")
+                        err_ln = int(err.line) if getattr(err, "line", None) else 0
+                        err_msg = str(err.message).strip()
+                        grouped_xsd.setdefault(err_ln, [])
+                        if err_msg not in grouped_xsd[err_ln]:
+                            grouped_xsd[err_ln].append(err_msg)
+                    for err_ln in sorted(grouped_xsd.keys()):
+                        combined_msg = " | ".join(grouped_xsd[err_ln])
+                        xml_issues.append(f"XSD Validation Error (line {err_ln}): ({combined_msg})")
                 else:
+
                     print(f"    ├── {C.GREEN}XSD schema validation passed{C.RESET} ({os.path.basename(schema_setting)}).")
         except Exception as e:
             xml_issues.append(f"XML Syntax/Parse Error: {str(e)}")

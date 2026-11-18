@@ -8,7 +8,9 @@ The sent data is associated to your addon by an ID (data protocol), which has to
 
 == Howto register your own custom event / data protocol ==
 After you wrote your code and before you upload your addon or library to ESOUI, you have to add the necessary information to the tables below.
-Simply pick the next free id, update your code accordingly and edit this wiki page.
+Simply pick the next free id, update your code accordingly and edit this wiki page.<br>
+'''READ THE ACTUAL HEADER INFORMATION FOR EVENTS, PROTOCOLS etc. PLEASE AND OBEY THE MAXIMUM ID RANGEs!'''<br> 
+'''DO NOT REMOVE OR USE ANY OTHER ADDON's IDs WIHTOUT TALKING TO THE RESPECTIVE AUTHORS FIRST!'''<br>
 
 == Handlers ==
 {| class="wikitable" 
@@ -371,10 +373,27 @@ Simply pick the next free id, update your code accordingly and edit this wiki pa
 | Plays the same memento for group members who use Permanent Memento, and stops it for everyone.
 | -
 | PermMementoSync
+|-
+| Group Builds
+| [https://www.esoui.com/forums/member.php?u=64399 f1rex]
+| GroupBuilds
+| no
+| Shares SuperStar builds between group members
+| -
+| GroupBuildsData
+|-
+| [https://www.esoui.com/downloads/info2403-BSCs-AdvancedSynergy.html BSCs-AdvancedSynergy]
+| [https://www.esoui.com/downloads/author-37549.html BloodStainCHild]
+| BSCs-AdvancedSynergy
+| no
+| Shares Priority and Blocking presets between group members.
+| -
+| BSCASPresetShare
 |}
 
 == Custom Events ==
-There are only 40 ids available, so please use them sparingly.
+There are only 40 ids available, so please use them sparingly!<br>
+You can use id 30 for local testing.<br>
 For simplicities sake, just pick the next available id. If you find yourself in need of several ids, consider writing a protocol instead.
 {| class="wikitable" 
 |-
@@ -437,7 +456,7 @@ For simplicities sake, just pick the next available id. If you find yourself in 
 | -
 | -
 | -
-|-
+|- style="background: #D1D1D1"
 | 39
 | reserved
 | use this id for local testing if you haven't picked one yet
@@ -447,7 +466,8 @@ For simplicities sake, just pick the next available id. If you find yourself in 
 (Add more rows as needed)
 
 == Protocols ==
-For protocols the id range is a bit larger and there are up to 512 ids available.
+For protocols the id range is a bit larger and there are up to 512 (0 .. 511 max!) ids available.<br>
+You can use id 511 for local testing if you haven't picked one yet.<br>
 In order to keep ids somewhat organized, it was suggested that for now everyone should "reserve" blocks of 10 ids, so future protocols that belong to the same handler can be added later if needed. The first 10 ids are reserved for LibGroupBroadcast itself and for legacy support of specific libraries that shared data via map pings.
 
 {| class="wikitable" 
@@ -456,17 +476,17 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 ! protocol name
 ! short description
 ! addon
-|-
+|- style="background: #D1D1D1"
 | 0
 | LibGroupSocket
 | Emulates the old protocol that operated on map pings
 | LibGroupSocket
-|-
+|- style="background: #D1D1D1"
 | 1
 | LibDataShare
 | '''DEPRECATED:''' Emulates the old LibDataShare Protocol that operated on map pings
 | LibDataShare
-|-
+|- style="background: #D1D1D1"
 | colspan="4" | ''2 - 9 reserved for LibGroupBroadcast and legacy protocols''
 |-
 | 10
@@ -647,9 +667,9 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 |-
 | colspan="4" | ''133-136 reserved for CombatHelper''
 |-
-| 140 - 149
+| 140 - 144
 | Achievement_Share_Data
-| Shares achievement data for dungeons, trials, etc. between group members. 
+| Shares achievement data for dungeons, trials, etc. between group members. Contact @eashi
 | Achievement Share
 |-
 | 150
@@ -776,6 +796,13 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Shares pull warning context (type, ability id/name, source, target) with group members.
 | Meridias BlockPooky
 |-
+| 260
+| BSCASPresetShare
+| Shares Priority and Blocking presets between group members.
+| BSCs-AdvancedSynergy
+|-
+| colspan="4" | ''261-269 reserved for BSCs-AdvancedSynergy''
+|-
 | 300
 | TheProfitHello
 | Announces that a group member runs The Profit and is ready to share tracked items (hello, reply, goodbye).
@@ -797,6 +824,11 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | The Profit
 |-
 | colspan="4" | ''304-309 reserved for The Profit''
+|-
+| 310
+| GroupBuildsData
+| Build request/response and availability between group members
+| Group Builds
 |-
 | 330
 | ElmsMarkersProtocol
@@ -838,7 +870,7 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Provide concise build information sharing among team members
 | SuperStar
 |-
-| colspan="4" | ''361-369 reserved for SuperStar''
+| colspan="4" | ''361-365 reserved for SuperStar''
 |-
 | colspan="4" | ''370-379 reserved for Xhrysanth's forthcoming XPlus add-ons.''
 |-
@@ -936,10 +968,17 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | CombatCoordinates
 | Shares 3D world coordinates and tracking information for combat ground effects (e.g. Standard of Might, Heals, Buffs).
 | CombatCoordinates
-|-
+|- style="background: #D1D1D1"
 | 511
 | reserved
 | you can use this id for local testing if you haven't picked one yet
+|
+|}
+(Add more rows as needed)
+
+'''IMPORTANT: The highest supported id is 511. Anything above that won't work correctly!'''
+{| class="wikitable" 
+|- style="font-weight:bold; font-family:Tahoma, Geneva, sans-serif !important;"
 |- style="background: #FF6868"
 | 512
 | Share data
@@ -951,8 +990,8 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Shares EZO family addon presence and compact informational group state, including activity and optional performance status.
 | EZOCore
 |}
-(Add more rows as needed)
 
-'''IMPORTANT: The highest supported id is 511. Anything above that won't work correctly!'''
+
+
 
 [[Category:LIBS]]

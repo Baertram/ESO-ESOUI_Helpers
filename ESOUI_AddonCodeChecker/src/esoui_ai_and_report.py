@@ -312,27 +312,44 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         mode_label=f"search {mode_prefix}{query_part} [{sel_input}]",
         force_download=force_download,
     )
-def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
+def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_only=False):
     """Builds a nested vBulletin [SIZE="2"][list]...[/list][/SIZE] tree marking flagged items with :mad: and manifests with [MANIFEST]."""
     lb, rb = chr(91), chr(93)
     tree = {}
     flagged_norm = {p.replace("\\", "/").rstrip("/") for p in flagged_paths}
     manifest_norm = {p.replace("\\", "/").rstrip("/") for p in (manifest_paths or set())}
+    omitted_clean_files = 0
 
     for entry in namelist:
         norm = entry.replace("\\", "/").strip("/")
         if not norm:
             continue
+        is_entry_file = not entry.endswith("/")
+        if errors_only and is_entry_file:
+            is_flagged_entry = (norm in flagged_norm) or any(norm.startswith(fp + "/") for fp in flagged_norm)
+            if not is_flagged_entry and norm not in manifest_norm:
+                omitted_clean_files += 1
+                continue
         parts = norm.split("/")
         node = tree
         for idx, part in enumerate(parts):
-            is_leaf_file = (idx == len(parts) - 1) and not entry.endswith("/")
+            is_leaf_file = (idx == len(parts) - 1) and is_entry_file
             if part not in node:
                 node[part] = None if is_leaf_file else {}
             elif node[part] is None and not is_leaf_file:
                 node[part] = {}
             if not is_leaf_file:
                 node = node[part]
+
+    def _prune_empty_dirs(sub_tree):
+        for k in list(sub_tree.keys()):
+            if isinstance(sub_tree[k], dict):
+                _prune_empty_dirs(sub_tree[k])
+                if not sub_tree[k]:
+                    del sub_tree[k]
+
+    if errors_only:
+        _prune_empty_dirs(tree)
 
     out_lines = [f'{lb}SIZE="2"{rb}{lb}list{rb}']
 
@@ -365,8 +382,11 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None):
                 _walk(child, curr_path)
                 out_lines.append(f"{lb}/list{rb}")
     _walk(tree)
+    if omitted_clean_files > 0:
+        out_lines.append(f"{lb}*{rb} [i]... ({omitted_clean_files} clean files without critical errors omitted)[/i]")
     out_lines.append(f"{lb}/list{rb}{lb}/SIZE{rb}")
     return "\n".join(out_lines)
+
 
 
 def _check_zip_structure(zip_path, report_data):
@@ -792,6 +812,13 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 )
                 continue
 
+            xsd_m = re.match(r'^XSD Validation Error\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$', item_text)
+            if xsd_m:
+                report_data["critical"][category]["XSD Validation Error"].append(
+                    (rel_norm, xsd_m.group(1).strip(), xsd_m.group(2).strip())
+                )
+                continue
+
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
             code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
@@ -850,8 +877,9 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                     report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
 
 
-def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0):
-    """Builds the ESOUI BBCode report text; compact_bp=1 collapses per-var lines, compact_bp=2 groups per file."""
+def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0, errors_only_tree=False):
+    """Builds the ESOUI BBCode report text with progressive compaction levels."""
+
     lb, rb = chr(91), chr(93)
     out = [
         "Welcome. Please review the add-on upload rules and best practices, and ensure all of your uploads follow them:",
@@ -866,18 +894,17 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}",
     ]
 
-    if report_data.get("zip_tree_bbcode"):
-        tree_bb = report_data["zip_tree_bbcode"]
-        pollution_files = {
-            os.path.basename(fp.replace("\\", "/"))
-            for fp, _, _, _ in (report_data.get("global_var_pollution") or [])
-        }
-        for leaf_name in pollution_files:
-            plain_leaf = f"{chr(91)}*{chr(93)} {leaf_name}"
-            flagged_leaf = f'{chr(91)}*{chr(93)} {chr(91)}color="Red"{chr(93)}:mad: {leaf_name}{chr(91)}/color{chr(93)}'
-            if plain_leaf in tree_bb:
-                tree_bb = tree_bb.replace(plain_leaf, flagged_leaf)
+    if report_data.get("zip_all_entries"):
+        tree_bb = _build_bbcode_zip_list(
+            report_data["zip_all_entries"],
+            report_data.get("zip_all_flagged", report_data.get("zip_flagged_paths", set())),
+            report_data.get("zip_manifest_paths", set()),
+            errors_only=errors_only_tree,
+        )
         out.append(tree_bb)
+    elif report_data.get("zip_tree_bbcode"):
+        out.append(report_data["zip_tree_bbcode"])
+
 
 
     unverified_entries = report_data.get("unverified_globals") or []
@@ -987,14 +1014,32 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             out.append(f"{lb}/list{rb}")
 
         grouped_globals = report_data.get("bp_grouped_globals")
-        if grouped_globals:
-            out.append("")
-            out.append(f"{lb}u{rb}Possible action: Global variable used multiple times without a local reference{lb}/u{rb}")
+        filtered_grouped_globals = defaultdict(dict)
+        for var_name, files_dict in grouped_globals.items():
+            for f_path, hits_list in files_dict.items():
+                if len(hits_list) > 1:
+                    filtered_grouped_globals[var_name][f_path] = hits_list
+
+        if filtered_grouped_globals:
+            out.append(
+                f"{lb}*{rb} {lb}b{rb}Global variable used multiple times without a local reference{lb}/b{rb} "
+                f"(cache in a local variable for faster lookup):"
+            )
             out.append(f"{lb}list{rb}")
-            if int(compact_bp) >= 2:
+            if int(compact_bp) >= 3:
                 per_file_vars = defaultdict(list)
-                for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
-                    for f_path, hits_list in grouped_globals[var_name].items():
+                for var_name in sorted(filtered_grouped_globals.keys(), key=lambda x: x.lower()):
+                    for f_path, hits_list in filtered_grouped_globals[var_name].items():
+                        per_file_vars[f_path].append(f"{var_name} (x{len(hits_list)})")
+                for f_path in sorted(per_file_vars.keys(), key=lambda x: x.lower()):
+                    var_list = per_file_vars[f_path]
+                    out.append(
+                        f'{lb}*{rb} {lb}b{rb}{f_path}{lb}/b{rb} ({len(var_list)} globals): {", ".join(var_list)}'
+                    )
+            elif int(compact_bp) == 2:
+                per_file_vars = defaultdict(list)
+                for var_name in sorted(filtered_grouped_globals.keys(), key=lambda x: x.lower()):
+                    for f_path, hits_list in filtered_grouped_globals[var_name].items():
                         per_file_vars[f_path].append((var_name, hits_list))
                 for f_path in sorted(per_file_vars.keys(), key=lambda x: x.lower()):
                     var_entries = per_file_vars[f_path]
@@ -1008,26 +1053,23 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
                     )
             else:
-                for var_name in sorted(grouped_globals.keys(), key=lambda x: x.lower()):
-                    files_map = grouped_globals[var_name]
-                    total_hits = sum(len(hits) for hits in files_map.values())
-                    spoiler_lines = []
-                    for f_path in sorted(files_map.keys(), key=lambda x: x.lower()):
-                        spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
-                        hits_list = files_map[f_path]
-                        if int(compact_bp) == 1 and len(hits_list) > 1:
-                            first_ln, first_code = hits_list[0]
-                            spoiler_lines.append(f"  {first_ln}: {first_code}")
-                            extra_lns = ", ".join(str(ln) for ln, _ in hits_list[1:])
-                            spoiler_lines.append(f"  Lines: {extra_lns}")
-                        else:
-                            for ln_no, code_txt in hits_list:
-                                spoiler_lines.append(f"  {ln_no}: {code_txt}")
-                    spoiler_body = "\n".join(spoiler_lines)
+                for var_name in sorted(filtered_grouped_globals.keys(), key=lambda x: x.lower()):
+                    files_dict = filtered_grouped_globals[var_name]
+                    total_hits = sum(len(v) for v in files_dict.values())
                     out.append(
-                        f'{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (x{total_hits}) '
-                        f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                        f"{lb}*{rb} {lb}b{rb}{var_name}{lb}/b{rb} (used {total_hits} times without local reference):"
                     )
+                    out.append(f"{lb}list{rb}")
+                    for f_path in sorted(files_dict.keys(), key=lambda x: x.lower()):
+                        hits_list = files_dict[f_path]
+                        if int(compact_bp) >= 1:
+                            all_lns = ", ".join(str(ln) for ln, _ in hits_list)
+                            out.append(f"{lb}*{rb} {f_path}: lines {all_lns}")
+                        else:
+                            for ln, code_snip in hits_list:
+                                code_suffix = f" [i]({code_snip})[/i]" if code_snip else ""
+                                out.append(f"{lb}*{rb} {f_path}:{ln}{code_suffix}")
+                    out.append(f"{lb}/list{rb}")
             out.append(f"{lb}/list{rb}")
 
         for bp_rule, entries in report_data["best_practices"].items():
@@ -1066,15 +1108,18 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
 
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
-    """Writes the compact, grouped ESOUI BBCode report, auto-compacting Best Practices until <= ESOUI_COMMENT_MAX_CHARS."""
-    rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0)
-    for level in (1, 2):
+    """Writes the compact, grouped ESOUI BBCode report, auto-compacting until <= ESOUI_COMMENT_MAX_CHARS."""
+    rendered = ""
+    for level, tree_errors_only in ((0, False), (1, False), (2, False), (3, False), (3, True)):
+        rendered = _build_bbcode_report_text(
+            zip_name, timestamp_str, report_data, compact_bp=level, errors_only_tree=tree_errors_only
+        )
         if len(rendered) <= ESOUI_COMMENT_MAX_CHARS:
             break
-        rendered = _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=level)
 
     with open(report_file_path, "w", encoding="utf-8") as wf:
         wf.write(rendered)
+
 
 def process_addon(zip_path, zip_name):
     """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
@@ -1208,11 +1253,13 @@ def process_addon(zip_path, zip_name):
                 else:
                     all_flagged.add(f_path)
     if report_data.get("zip_all_entries"):
+        report_data["zip_all_flagged"] = set(all_flagged)
         report_data["zip_tree_bbcode"] = _build_bbcode_zip_list(
             report_data["zip_all_entries"],
             all_flagged,
             report_data.get("zip_manifest_paths", set()),
         )
+
 
     _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 

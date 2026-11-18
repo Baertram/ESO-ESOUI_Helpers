@@ -31,6 +31,7 @@ DEPENDENCY_CACHE_SCHEMA = 6
 DEPENDENCY_CACHE_FILE = os.path.join("Cache", "dependency_globals_cache.json")
 LOCAL_ADDONS_MANIFEST_INDEX = None
 ESOUI_RAM_DICTIONARY = {}
+ESOUI_GLOBAL_DEFINES = set()
 ESOUI_UNDOCUMENTED_SET = set()
 ESOUI_INDEX_BUILT = False
 
@@ -397,6 +398,8 @@ def build_esoui_index_once():
     print(f"\n{C.CYAN}[INIT] Building lightning-fast keyword dictionary in RAM...{C.RESET}")
     start_time = datetime.now()
     broad_extractor = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
+    top_global_func_rx = re.compile(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+    top_global_var_rx = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)')
 
     if os.path.exists(ESO_API_DOC_FILE):
         try:
@@ -459,6 +462,13 @@ def build_esoui_index_once():
                 for line in full_content.splitlines():
                     cleaned_line = line.strip()
                     if cleaned_line:
+                        if file.lower().endswith('.lua'):
+                            m_gfn = top_global_func_rx.match(cleaned_line)
+                            if m_gfn:
+                                ESOUI_GLOBAL_DEFINES.add(m_gfn.group(1))
+                            m_gvar = top_global_var_rx.match(cleaned_line)
+                            if m_gvar:
+                                ESOUI_GLOBAL_DEFINES.add(m_gvar.group(1))
                         for w in set(broad_extractor.findall(cleaned_line)):
                             if len(w) >= 3 and w not in ESOUI_RAM_DICTIONARY:
                                 ESOUI_RAM_DICTIONARY[w] = f"ESOUI Source ({file}): {cleaned_line}"
@@ -522,6 +532,7 @@ def build_esoui_index_once():
 
     undoc_valid, _ = load_undocumented_globals(ESO_UNDOCUMENTED_GLOBALS_FILE)
     ESOUI_UNDOCUMENTED_SET.update(undoc_valid)
+    ESOUI_GLOBAL_DEFINES.update(undoc_valid)
     for w in undoc_valid:
         if w not in ESOUI_RAM_DICTIONARY:
             ESOUI_RAM_DICTIONARY[w] = "Undocumented ESO Global: " + w

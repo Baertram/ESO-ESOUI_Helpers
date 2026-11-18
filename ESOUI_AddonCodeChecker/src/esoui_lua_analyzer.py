@@ -48,6 +48,7 @@ from src.esoui_config import (
 from src.esoui_ram_index import (
     ESOUI_EVENT_HAS_UNIT_TAG,
     ESOUI_EVENT_PARAM_TYPES,
+    ESOUI_GLOBAL_DEFINES,
     ESOUI_RAM_DICTIONARY,
     ESOUI_UNDOCUMENTED_SET,
     build_esoui_index_once,
@@ -1191,6 +1192,52 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
             )
 
 
+def _build_line_local_scopes(code_only):
+    """
+    Computes per-line active sets of valid local variables, loop variables,
+    and function parameters in the enclosing lexical scope.
+    """
+    lines = code_only.splitlines()
+    active_scopes = [set()]
+    line_scopes = []
+    block_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b|\b(end|until)\b')
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("local function "):
+            m_lf = re.match(r'^local\s+function\s+([A-Za-z_][A-Za-z0-9_]*)', stripped)
+            if m_lf:
+                active_scopes[-1].add(m_lf.group(1))
+
+        for m_fn in re.finditer(r'\bfunction(?:\s+[A-Za-z_][A-Za-z0-9_.:]*)?\s*\(([^)]*)\)', line):
+            params = {p.strip() for p in m_fn.group(1).split(",") if p.strip() and p.strip() != "..."}
+            active_scopes.append(params)
+
+        m_for = re.match(r'^for\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)\s+(?:in|=)\b', stripped)
+        if m_for:
+            fvars = {v.strip() for v in m_for.group(1).split(",") if v.strip()}
+            active_scopes.append(fvars)
+
+        line_scopes.append(set().union(*active_scopes))
+
+        if stripped.startswith("local ") and not stripped.startswith("local function"):
+            decl = stripped[6:].split("=", 1)[0]
+            for v in decl.split(","):
+                clean_v = v.strip()
+                if clean_v:
+                    active_scopes[-1].add(clean_v)
+
+        for bm in block_rx.finditer(line):
+            b_open, b_close = bm.groups()
+            if b_open in ("if", "while", "repeat", "do"):
+                active_scopes.append(set())
+            elif b_close in ("end", "until") and len(active_scopes) > 1:
+                active_scopes.pop()
+
+    return line_scopes
+
+
 def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=None):
     """
     Detects global variable assignments (missing 'local') anywhere in a Lua file,
@@ -1201,7 +1248,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
 
     code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
     lines = code_only.splitlines()
-    file_locals = _collect_lua_local_identifiers(code_only)
+    line_local_scopes = _build_line_local_scopes(code_only)
 
     global_tables = set(addon_ctx.get("all_global_tables", set()))
     table_prefixes = tuple(f"{gt}_" for gt in global_tables if gt)
@@ -1209,7 +1256,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
     allowed_globals = (
         global_tables
         | set(addon_ctx.get("saved_variables", set()))
-        | set(ESOUI_RAM_DICTIONARY.keys())
+        | set(ESOUI_GLOBAL_DEFINES)
         | ESOUI_UNDOCUMENTED_SET
         | LUA_STD_LIBS
     )
@@ -1230,6 +1277,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
         if not stripped:
             continue
         is_local_stmt = stripped.startswith("local ")
+        scoped_locals = line_local_scopes[idx - 1] if idx - 1 < len(line_local_scopes) else set()
 
         for m in token_rx.finditer(line):
             g_open_brace, g_close_brace, g_block_open, g_block_close, var_name = m.groups()
@@ -1246,8 +1294,9 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
             elif var_name and not is_local_stmt:
                 if scope_stack and scope_stack[-1] == "table":
                     continue
-                if var_name in lua_keywords or var_name in file_locals or var_name in allowed_globals:
+                if var_name in lua_keywords or var_name in scoped_locals or var_name in allowed_globals:
                     continue
+
                 prefix = line[:m.start(5)].rstrip()
                 if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
                     continue
