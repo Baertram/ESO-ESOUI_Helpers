@@ -12,7 +12,12 @@ from src.esoui_config import (
     EXTRACT_FOLDER,
     resolve_config_file_path,
 )
-from src.esoui_filelist_search import annotate_depends_on_line
+from src.esoui_config import CACHE_ADDONS_EXTRACTED_DIR, ESO_ADDONS_DIR
+from src.esoui_filelist_search import (
+    annotate_depends_on_line,
+    is_standalone_online_addon,
+    resolve_dependency_online_package,
+)
 from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
 
 from src.esoui_ram_index import (
@@ -54,7 +59,8 @@ def _check_manifest_folder_match(file_name, manifest_issues):
             )
 
 
-def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions):
+def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions, addon_ctx=None):
+    bundled_subs = set((addon_ctx or {}).get("bundled_sub_addons") or ())
     for tag in ["DependsOn", "PCDependsOn", "ConsoleDependsOn"]:
         if line_str.startswith("## " + tag + ":") or line_str.startswith("## " + tag + " "):
             if ":" in line_str:
@@ -64,7 +70,16 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_s
                     manifest_issues.append(
                         f"Invalid delimiter in {tag} (line {line_num}): Use spaces instead of commas or semicolons (-- {line_str})."
                     )
-                annotated_line, has_missing, has_outdated = annotate_depends_on_line(line_str)
+                internal_only = [
+                    next(iter(tok.split(">=", 1))).strip()
+                    for tok in dep_part.split()
+                    if ">=" not in tok
+                    and tok.strip().lower() in bundled_subs
+                    and not is_standalone_online_addon(tok.strip())
+                ]
+                annotated_line, has_missing, has_outdated = annotate_depends_on_line(
+                    line_str, bundled_internal_deps=internal_only
+                )
                 if has_missing:
                     manifest_issues.append(
                         f"Mandatory version check >= missing for non-optional dependency (line {line_num}): ({annotated_line})"
@@ -73,6 +88,17 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_s
                     manifest_suggestions.append(
                         f"Mandatory version check >= outdated - consider an update (line {line_num}): ({annotated_line})"
                     )
+                for tok in dep_part.split():
+                    dep_clean = next(iter(tok.split(">=", 1))).strip()
+                    if not dep_clean or dep_clean.lower() in bundled_subs:
+                        continue
+                    in_live = os.path.isdir(os.path.join(ESO_ADDONS_DIR, dep_clean))
+                    in_cache = os.path.isdir(os.path.join(CACHE_ADDONS_EXTRACTED_DIR, dep_clean))
+                    in_online = resolve_dependency_online_package(dep_clean) is not None
+                    if not in_live and not in_cache and not in_online:
+                        manifest_issues.append(
+                            f"Non-existent dependency '{dep_clean}' (not found in ZIP, live/AddOns, Cache, or ESOUI) (line {line_num}): (-- {line_str})"
+                        )
 
 
     if line_str.startswith("## OptionalDependsOn:") or line_str.startswith("## OptionalDependsOn "):
@@ -132,7 +158,7 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
                     f"Outdated APIVersion (missing current live API {current_api}) (line {line_num}): (-- {line_str})"
                 )
 
-        _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions)
+        _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions, addon_ctx=addon_ctx)
 
     if detected_api_line is not None:
         print(f"    ├── Detected ## APIVersion: {detected_api_line} {C.CYAN}(Current Live API: {current_api or 'Unknown'}){C.RESET}")
@@ -231,7 +257,6 @@ def _extract_xml_inline_lua_leaks(content, addon_ctx):
                 orig = raw_lines[ln_no - 1].strip() if (ln_no - 1) < len(raw_lines) else ""
                 leaks.append(f"Inline XML Lua global function leak in <{tag_name}> (line {ln_no}): (-- {orig})")
     return leaks
-
 
 def analyze_xml_file(file_name, content, addon_ctx):
     is_bindings = (os.path.basename(file_name).lower() == "bindings.xml")

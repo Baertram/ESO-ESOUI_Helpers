@@ -460,10 +460,21 @@ def lookup_dependency_addon_version(
     return fallback_title_ver
 
 
+def is_standalone_online_addon(
+    dep_name: str,
+    filelist: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Returns True if dep_name exists as a standalone (non-embedded) Live add-on/library in filelist.json."""
+    pkg = resolve_dependency_online_package(dep_name, filelist=filelist)
+    return bool(pkg and not pkg.get("is_embedded"))
+
+
 def annotate_depends_on_line(
     raw_line: str,
     filelist: Optional[List[Dict[str, Any]]] = None,
+    bundled_internal_deps: Optional[Sequence[str]] = None,
 ) -> Tuple[str, bool, bool]:
+
     """
     Annotiert alle Dependencies in einer '## DependsOn:'-Zeile anhand der v4 filelist.json:
       ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
@@ -479,6 +490,7 @@ def annotate_depends_on_line(
     annotated_tokens: List[str] = []
     has_missing = False
     has_outdated = False
+    bundled_lower = {d.strip().lower() for d in (bundled_internal_deps or ()) if d and d.strip()}
 
     for token in tokens:
         if ">=" in token:
@@ -491,6 +503,10 @@ def annotate_depends_on_line(
             dep_name = token.strip()
             declared_ver = None
             has_ge = False
+
+        if not has_ge and dep_name.lower() in bundled_lower:
+            annotated_tokens.append(token)
+            continue
 
         latest_ver = lookup_dependency_addon_version(dep_name, filelist=filelist)
         if latest_ver is not None:
@@ -508,3 +524,129 @@ def annotate_depends_on_line(
 
     return f"{header.strip()}: {' '.join(annotated_tokens)}", has_missing, has_outdated
 
+
+def _version_to_tuple(ver_val: Any) -> Tuple[int, ...]:
+    """Extrahiert alle Zahlengruppen aus einer AddOnVersion oder einem Version-String als Vergleichs-Tupel."""
+    if ver_val is None:
+        return ()
+    if isinstance(ver_val, int):
+        return (ver_val,)
+    nums = re.findall(r"\d+", str(ver_val))
+    return tuple(int(n) for n in nums)
+
+
+def compare_version_values(local_ver: Any, remote_ver: Any) -> int:
+    """
+    Vergleicht zwei Versionswerte (int AddOnVersion oder str Version):
+    Gibt -1 zurück wenn local_ver < remote_ver, 0 wenn gleich, 1 wenn local_ver > remote_ver.
+    """
+    if isinstance(local_ver, int) and isinstance(remote_ver, int):
+        return -1 if local_ver < remote_ver else (1 if local_ver > remote_ver else 0)
+    t_loc = _version_to_tuple(local_ver)
+    t_rem = _version_to_tuple(remote_ver)
+    if t_loc and t_rem:
+        max_len = max(len(t_loc), len(t_rem))
+        p_loc = t_loc + (0,) * (max_len - len(t_loc))
+        p_rem = t_rem + (0,) * (max_len - len(t_rem))
+        return -1 if p_loc < p_rem else (1 if p_loc > p_rem else 0)
+    s_loc = str(local_ver or "").strip().lower()
+    s_rem = str(remote_ver or "").strip().lower()
+    return -1 if s_loc < s_rem else (1 if s_loc > s_rem else 0)
+
+
+def resolve_dependency_online_package(
+    dep_name: str,
+    filelist: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Sucht alle Live-Pakete in der MMOUI v4 filelist.json, die `dep_name` entweder als
+    eigenständiges Addon oder als eingebettete Library (z. B. 'MasterMerchant/Libs/LibGuildStore')
+    enthalten, und wählt den Eintrag mit der höchsten Version (bei Gleichstand Standalone bevorzugt).
+    """
+    target = dep_name.strip().lower()
+    if not target:
+        return None
+    try:
+        items = filelist if filelist is not None else get_filelist(force=False)
+    except Exception:
+        return None
+
+    candidates: List[Tuple[int, Tuple[int, ...], int, int, Dict[str, Any]]] = []
+
+    for entry in items:
+        if not _is_live_addon(entry) or is_discontinued_or_outdated(entry):
+            continue
+        addon_id = _extract_id(entry)
+        if not addon_id:
+            continue
+        pkg_title = _extract_title(entry)
+        pkg_ver_str = _extract_version(entry)
+        pkg_addon_ver = _parse_numeric_addon_version(
+            entry.get("addOnVersion") if entry.get("addOnVersion") is not None else entry.get("addonVersion")
+        )
+        sub_addons = entry.get("addons")
+        matched_sub = False
+
+        if isinstance(sub_addons, list):
+            for sub in sub_addons:
+                if not isinstance(sub, dict):
+                    continue
+                raw_path = str(sub.get("path") or sub.get("dir") or sub.get("folder") or "").replace("\\", "/").strip("/")
+                names_to_check = set()
+                for key in ("path", "dir", "folder", "name", "manifest"):
+                    raw_id = str(sub.get(key) or "").replace("\\", "/").strip("/").lower()
+                    if raw_id:
+                        stem = os.path.splitext(raw_id)[0]
+                        names_to_check.add(raw_id)
+                        names_to_check.add(stem)
+                        names_to_check.add(raw_id.rsplit("/", 1)[-1])
+                        names_to_check.add(stem.rsplit("/", 1)[-1])
+
+                if target in names_to_check:
+                    matched_sub = True
+                    sub_ver = _parse_numeric_addon_version(
+                        sub.get("addOnVersion") if sub.get("addOnVersion") is not None else sub.get("addonVersion")
+                    )
+                    eff_num_ver = sub_ver if sub_ver is not None else pkg_addon_ver
+                    sub_path = raw_path if raw_path else dep_name.strip()
+                    is_embedded = "/" in sub_path
+                    has_num_av = 1 if eff_num_ver is not None else 0
+                    ver_tuple = (eff_num_ver,) if eff_num_ver is not None else _version_to_tuple(pkg_ver_str)
+                    standalone_bonus = 0 if is_embedded else 1
+                    has_ver_bonus = 1 if ver_tuple else 0
+                    info = {
+                        "addon_id": addon_id,
+                        "title": pkg_title,
+                        "add_on_version": eff_num_ver,
+                        "version_str": pkg_ver_str,
+                        "sub_path": sub_path,
+                        "is_embedded": is_embedded,
+                    }
+                    candidates.append((has_num_av, ver_tuple, standalone_bonus, has_ver_bonus, info))
+
+        if not matched_sub:
+            raw_title = pkg_title.lower()
+            title_base = re.split(r"\s+[-–:|(]\s*", raw_title, maxsplit=1)[0].strip()
+            if raw_title == target or title_base == target:
+                has_num_av = 1 if pkg_addon_ver is not None else 0
+                ver_tuple = (pkg_addon_ver,) if pkg_addon_ver is not None else _version_to_tuple(pkg_ver_str)
+                has_ver_bonus = 1 if ver_tuple else 0
+                info = {
+                    "addon_id": addon_id,
+                    "title": pkg_title,
+                    "add_on_version": pkg_addon_ver,
+                    "version_str": pkg_ver_str,
+                    "sub_path": dep_name.strip(),
+                    "is_embedded": False,
+                }
+                candidates.append((has_num_av, ver_tuple, 1, has_ver_bonus, info))
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (item.__getitem__(0), item.__getitem__(1), item.__getitem__(2), item.__getitem__(3)),
+        reverse=True,
+    )
+    _, _, _, _, best_info = next(iter(candidates))
+    return best_info

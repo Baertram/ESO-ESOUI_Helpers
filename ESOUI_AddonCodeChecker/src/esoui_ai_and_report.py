@@ -1163,7 +1163,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
         grouped_globals = report_data.get("bp_grouped_globals")
         filtered_grouped_globals = defaultdict(dict)
-        for var_name, files_dict in grouped_globals.items():
+        for var_name, files_dict in (grouped_globals or {}).items():
             for f_path, hits_list in files_dict.items():
                 if len(hits_list) > 1:
                     filtered_grouped_globals[var_name][_strip_addon_root_prefix(f_path)] = hits_list
@@ -1334,6 +1334,17 @@ def process_addon(zip_path, zip_name):
         if not is_index_built():
             build_esoui_index_once()
         addon_ctx = collect_addon_context(current_extract_dir)
+        id_m = re.search(r'(?:^|[_-])(\d{2,6})(?:[_.-]|$)', zip_clean_name)
+        if id_m:
+            addon_ctx["current_addon_id"] = id_m.group(1)
+        else:
+            from src.esoui_filelist_search import resolve_dependency_online_package
+            for root_mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+                root_stem, _ = os.path.splitext(root_mf)
+                pkg_self = resolve_dependency_online_package(root_stem)
+                if pkg_self and not pkg_self.get("is_embedded"):
+                    addon_ctx["current_addon_id"] = pkg_self.get("addon_id")
+                    break
 
         files_to_process = []
         for root, _, files in os.walk(current_extract_dir):
@@ -1374,7 +1385,13 @@ def process_addon(zip_path, zip_name):
                                 if stripped_r.startswith("[BEST PRACTICE"):
                                     break
                                 if in_crit and stripped_r.startswith("- "):
-                                    print_wrapped_tree_item(stripped_r, color=C.RED)
+                                    clean_console_r = re.sub(
+                                        r"\[/?(?:color|b|i|u|s|size|font|url|spoiler|list|\*)(?:=[^\]]+)?\]",
+                                        "",
+                                        stripped_r,
+                                        flags=re.IGNORECASE,
+                                    )
+                                    print_wrapped_tree_item(clean_console_r, color=C.RED)
                             print(f"    └── {C.RED}See report for full details.{C.RESET}")
                         else:
                             print(f"    └── {status_tag} {file_label} check finished.")

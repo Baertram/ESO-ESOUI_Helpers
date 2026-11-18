@@ -15,6 +15,8 @@ from datetime import datetime
 from src.esoui_config import (
     ALLOWED_DOWNLOAD_DOMAINS,
     C,
+    CACHE_ADDONS_DIR,
+    CACHE_DIR,
     ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
     ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX,
     ESOUI_LATEST_MAX_ITEMS,
@@ -330,12 +332,13 @@ def parse_dl_command(text_input):
 
 
 def handle_clear_command(arg_str):
-    """Handles 'clear cache', 'clear zips [YYMMDD]', and 'clear reports [YYMMDD]'."""
+    """Handles 'clear cache', 'clear cache addons', 'clear zips [YYMMDD]', and 'clear reports [YYMMDD]'."""
     raw_args = (arg_str or "").strip()
     if not raw_args:
         print(
             f"{C.RED}-> Error: Missing parameter for 'clear'. Usage:\n"
             f"   - clear cache\n"
+            f"   - clear cache addons\n"
             f"   - clear zips [YYMMDD]\n"
             f"   - clear reports [YYMMDD]{C.RESET}"
         )
@@ -344,12 +347,15 @@ def handle_clear_command(arg_str):
     parts = raw_args.split()
     target_type = parts[0].lower()
     if target_type not in ("cache", "zips", "reports"):
-        print(f"{C.RED}-> Error: Unknown 'clear' target '{parts[0]}'. Allowed targets: cache, zips, reports.{C.RESET}")
+        print(f"{C.RED}-> Error: Unknown 'clear' target '{parts[0]}'. Allowed targets: cache, cache addons, zips, reports.{C.RESET}")
         return
-    if target_type == "cache" and len(parts) > 1:
-        print(f"{C.RED}-> Error: 'clear cache' does not accept a date parameter.{C.RESET}")
-        return
-    if len(parts) > 2:
+    if target_type == "cache":
+        if len(parts) == 2 and parts[1].lower() == "addons":
+            target_type = "cache_addons"
+        elif len(parts) > 1:
+            print(f"{C.RED}-> Error: 'clear cache' only accepts optional sub-target 'addons' ('clear cache addons').{C.RESET}")
+            return
+    elif len(parts) > 2:
         print(f"{C.RED}-> Error: Too many parameters for 'clear {target_type}'. Expected optional YYMMDD date.{C.RESET}")
         return
 
@@ -367,20 +373,32 @@ def handle_clear_command(arg_str):
             return
 
     files_to_delete, dirs_to_delete = [], []
-    if target_type == "cache":
-        root_dir = get_project_root_dir()
-        for pycache_dir in (os.path.join(root_dir, "__pycache__"), os.path.join(root_dir, "src", "__pycache__")):
-            if os.path.isdir(pycache_dir):
-                for root, dirs, files in os.walk(pycache_dir, topdown=False):
-                    for fn in files:
-                        files_to_delete.append(os.path.join(root, fn))
-                    for dn in dirs:
-                        dirs_to_delete.append(os.path.join(root, dn))
-                dirs_to_delete.append(pycache_dir)
-        for cache_fn in ("filelist.json", "dependency_globals_cache.json"):
-            cache_file = os.path.join("Cache", cache_fn)
-            if os.path.isfile(cache_file):
-                files_to_delete.append(os.path.abspath(cache_file))
+    if target_type in ("cache", "cache_addons"):
+        if target_type == "cache":
+            root_dir = get_project_root_dir()
+            for pycache_dir in (os.path.join(root_dir, "__pycache__"), os.path.join(root_dir, "src", "__pycache__")):
+                if os.path.isdir(pycache_dir):
+                    for root, dirs, files in os.walk(pycache_dir, topdown=False):
+                        for fn in files:
+                            files_to_delete.append(os.path.join(root, fn))
+                        for dn in dirs:
+                            dirs_to_delete.append(os.path.join(root, dn))
+                    dirs_to_delete.append(pycache_dir)
+            fl_cache = os.path.join(CACHE_DIR, "filelist.json")
+            if os.path.isfile(fl_cache):
+                files_to_delete.append(os.path.abspath(fl_cache))
+
+        dep_cache = os.path.join(CACHE_DIR, "dependency_globals_cache.json")
+        if os.path.isfile(dep_cache):
+            files_to_delete.append(os.path.abspath(dep_cache))
+
+        if os.path.isdir(CACHE_ADDONS_DIR):
+            for root, dirs, files in os.walk(CACHE_ADDONS_DIR, topdown=False):
+                for fn in files:
+                    files_to_delete.append(os.path.join(root, fn))
+                for dn in dirs:
+                    dirs_to_delete.append(os.path.join(root, dn))
+            dirs_to_delete.append(os.path.abspath(CACHE_ADDONS_DIR))
 
     else:
         base_target_dir = ZIP_FOLDER if target_type == "zips" else REPORTS_BASE_DIR
@@ -434,7 +452,7 @@ def handle_clear_command(arg_str):
         except Exception as e:
             print(f"  {C.YELLOW}[ERROR FOLDER]{C.RESET}   {d_path} ({e})")
 
-    if target_type == "cache":
+    if target_type in ("cache", "cache_addons"):
         try:
             from src.esoui_ram_index import reset_dependency_globals_cache
             reset_dependency_globals_cache()

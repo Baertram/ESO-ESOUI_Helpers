@@ -55,6 +55,19 @@ WIKI_LGB_IDS_TXT_FILE = os.path.join(ADD_INPUT_DIR, "LibGroupBroadcast_IDs.txt")
 
 
 ESO_ADDONS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Elder Scrolls Online", "live", "AddOns")
+CACHE_DIR = "Cache"
+CACHE_ADDONS_DIR = os.path.join(CACHE_DIR, "AddOns")
+CACHE_ADDONS_EXTRACTED_DIR = os.path.join(CACHE_ADDONS_DIR, "_extracted")
+
+# Case-insensitive directory names inside an add-on that NEVER load on PC clients
+PC_IGNORED_SUBDIRS = frozenset({
+    "console",
+    "xb1",
+    "playstation",
+    "internal",
+    "future",
+})
+
 
 # Authorized domains and MMOUI/ESOUI limits
 ALLOWED_DOWNLOAD_DOMAINS = {"esoui.com", "://esoui.com", "mmoui.com"}

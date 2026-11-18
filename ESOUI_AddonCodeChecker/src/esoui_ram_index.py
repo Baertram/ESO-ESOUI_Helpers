@@ -9,10 +9,14 @@ import os
 import re
 import shutil
 import sys
+import zipfile
 from datetime import datetime
 
 from src.esoui_config import (
     C,
+    CACHE_ADDONS_DIR,
+    CACHE_ADDONS_EXTRACTED_DIR,
+    ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
     ESO_ADDONS_DIR,
     ESO_API_DOC_FILE,
     ESO_EXTRA_GLOBALS_FILE,
@@ -20,9 +24,64 @@ from src.esoui_config import (
     ESO_UNDOCUMENTED_GLOBALS_FILE,
     EXCLUDED_DEPENDENCY_ADDON_FOLDERS,
     EXCLUDED_DEPENDENCY_FILES,
+    PC_IGNORED_SUBDIRS,
+    make_clickable_file_link,
     resolve_config_file_path,
 )
 
+
+def _is_pc_ignored_rel_path(rel_path):
+    """Returns True if any directory segment in rel_path is Console, XB1, Playstation, Internal, or Future."""
+    norm = rel_path.replace("\\", "/").strip("/")
+    if not norm:
+        return False
+    parts = [p.lower() for p in norm.split("/")[:-1] if p]
+    return any(seg in PC_IGNORED_SUBDIRS for seg in parts)
+
+
+def _find_addon_manifest_file(folder_path, expected_stem=None):
+    """Finds the primary .addon or .txt manifest inside folder_path."""
+    if not folder_path or not os.path.isdir(folder_path):
+        return None
+    stem = expected_stem or os.path.basename(os.path.normpath(folder_path))
+    for ext in (".addon", ".txt"):
+        cand = os.path.join(folder_path, stem + ext)
+        if os.path.isfile(cand):
+            return cand
+    for fname in sorted(os.listdir(folder_path)):
+        if fname.lower().endswith((".addon", ".txt")):
+            cand_p = os.path.join(folder_path, fname)
+            if os.path.isfile(cand_p):
+                try:
+                    with open(cand_p, "r", encoding="utf-8", errors="ignore") as chk_f:
+                        head = chk_f.read(2048).lstrip("\ufeff")
+                    if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", head, flags=re.MULTILINE | re.IGNORECASE):
+                        return cand_p
+                except Exception:
+                    pass
+    return None
+
+
+def _read_manifest_version_info(folder_path, expected_stem=None):
+    """Reads '## AddOnVersion:' (int) and fallback '## Version:' (str) from an add-on's manifest."""
+    mf_path = _find_addon_manifest_file(folder_path, expected_stem=expected_stem)
+    if not mf_path:
+        return None
+    add_on_ver = None
+    ver_str = ""
+    try:
+        with open(mf_path, "r", encoding="utf-8", errors="ignore") as fh:
+            for raw_line in fh:
+                line = raw_line.lstrip("\ufeff").strip()
+                m_av = re.match(r"^##\s*AddOnVersion\s*:\s*(\d+)", line, flags=re.IGNORECASE)
+                if m_av and add_on_ver is None:
+                    add_on_ver = int(m_av.group(1))
+                m_v = re.match(r"^##\s*Version\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+                if m_v and not ver_str:
+                    ver_str = m_v.group(1).strip()
+    except Exception:
+        return None
+    return {"add_on_version": add_on_ver, "version_str": ver_str, "manifest_path": mf_path}
 
 ESO_WORD_CACHE = {}
 DEPENDENCY_GLOBALS_CACHE = {}
@@ -276,10 +335,12 @@ def _compute_dir_fingerprint(dir_path, addon_folder_label=None):
     hasher = hashlib.sha256()
     entries = []
     for root, dirs, files in os.walk(dir_path):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if d.lower() not in PC_IGNORED_SUBDIRS)
         for fn in sorted(files):
             full_p = os.path.join(root, fn)
             rel_p = os.path.relpath(full_p, dir_path).replace("\\", "/")
+            if _is_pc_ignored_rel_path(rel_p):
+                continue
             if addon_folder_label and _is_excluded_dependency_file(f"/{addon_folder_label}/{rel_p}"):
                 continue
             try:
@@ -583,12 +644,12 @@ def get_current_api_version():
 
 
 def parse_manifest_dependencies(manifest_text):
-    """Extracts DependsOn and OptionalDependsOn entries and flags invalid '>=' in OptionalDependsOn."""
+    """Extracts DependsOn, PCDependsOn, and OptionalDependsOn entries (ignores ConsoleDependsOn)."""
     deps = []
     invalid_optional = []
     for raw_line in manifest_text.splitlines():
         line = raw_line.strip()
-        m_dep = re.match(r'^##\s*DependsOn\s*:\s*(.+)$', line, flags=re.IGNORECASE)
+        m_dep = re.match(r'^##\s*(?:PC)?DependsOn\s*:\s*(.+)$', line, flags=re.IGNORECASE)
         if m_dep:
             for token in m_dep.group(1).split():
                 clean_name = next(iter(token.split(">="))).strip()
@@ -603,7 +664,104 @@ def parse_manifest_dependencies(manifest_text):
                 if clean_name and clean_name not in deps:
                     deps.append(clean_name)
     return deps, invalid_optional
-def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
+
+
+def _is_extracted_cache_up_to_date(target_dir, pkg_info):
+    """Checks if target_dir in Cache/AddOns/_extracted already matches the online version."""
+    if not os.path.isdir(target_dir):
+        return False
+    from src.esoui_filelist_search import compare_version_values
+
+    local_info = _read_manifest_version_info(target_dir)
+    if not local_info:
+        return False
+    rem_av = pkg_info.get("add_on_version")
+    loc_av = local_info.get("add_on_version")
+    if rem_av is not None and loc_av is not None:
+        return loc_av >= rem_av
+    rem_vs = pkg_info.get("version_str") or ""
+    loc_vs = local_info.get("version_str") or ""
+    if rem_vs and loc_vs:
+        return compare_version_values(loc_vs, rem_vs) >= 0
+    return True
+
+
+def _ensure_cached_dependency_addon(dep_name, pkg_info, reason_text):
+    """
+    Ensures the up-to-date dependency ZIP is downloaded to Cache/AddOns/ (overwriting existing ZIPs)
+    and extracted 1:1 to Cache/AddOns/_extracted/<top_dir> (deleting existing target dir first).
+    Returns the resolved folder path to scan, or None on failure.
+    """
+    sub_rel = pkg_info.get("sub_path") or dep_name
+    extracted_target_dir = os.path.join(CACHE_ADDONS_EXTRACTED_DIR, *sub_rel.split("/"))
+    online_ver_disp = (
+        f"AddOnVersion {pkg_info['add_on_version']}"
+        if pkg_info.get("add_on_version") is not None
+        else f"Version {pkg_info.get('version_str') or 'unknown'}"
+    )
+
+    if _is_extracted_cache_up_to_date(extracted_target_dir, pkg_info):
+        dir_link = make_clickable_file_link(extracted_target_dir, color=C.CYAN)
+        print(
+            f"    │     {C.YELLOW}⚠ Dependency '{C.WHITE}{dep_name}{C.YELLOW}' ({reason_text}):{C.RESET} "
+            f"Loading cached {C.GREEN}{online_ver_disp}{C.RESET} from {dir_link}"
+        )
+        return extracted_target_dir
+
+    addon_id = pkg_info["addon_id"]
+    dl_url = f"{ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX}{addon_id}/"
+    print(
+        f"    │     {C.YELLOW}⚠ Dependency '{C.WHITE}{dep_name}{C.YELLOW}' ({reason_text}):{C.RESET} "
+        f"Downloading latest {C.GREEN}{online_ver_disp}{C.RESET} (ESOUI ID {addon_id})..."
+    )
+
+    from src.esoui_download_io import download_zip
+
+    os.makedirs(CACHE_ADDONS_DIR, exist_ok=True)
+    tmp_dl_root = os.path.join(CACHE_ADDONS_DIR, "_tmp_dl")
+    downloaded_path, zip_filename = download_zip(dl_url, tmp_dl_root, force_download=True)
+    if not downloaded_path or not zip_filename or not os.path.isfile(downloaded_path):
+        print(f"    │       {C.RED}✖ Failed to download dependency '{dep_name}' (ID {addon_id}).{C.RESET}")
+        return None
+
+    final_zip_path = os.path.join(CACHE_ADDONS_DIR, zip_filename)
+    try:
+        if os.path.isfile(final_zip_path):
+            os.remove(final_zip_path)
+        shutil.move(downloaded_path, final_zip_path)
+        shutil.rmtree(tmp_dl_root, ignore_errors=True)
+    except OSError as exc:
+        print(f"    │       {C.RED}✖ Failed to store cached ZIP '{final_zip_path}': {exc}{C.RESET}")
+        return None
+
+    os.makedirs(CACHE_ADDONS_EXTRACTED_DIR, exist_ok=True)
+    try:
+        with zipfile.ZipFile(final_zip_path, "r") as zf:
+            top_dirs = {
+                member.replace("\\", "/").split("/", 1)[0]
+                for member in zf.namelist()
+                if member.strip() and not member.startswith("__MACOSX")
+            }
+            for td in sorted(top_dirs):
+                existing_extracted = os.path.join(CACHE_ADDONS_EXTRACTED_DIR, td)
+                if os.path.isdir(existing_extracted):
+                    shutil.rmtree(existing_extracted, ignore_errors=True)
+                elif os.path.isfile(existing_extracted):
+                    os.remove(existing_extracted)
+            zf.extractall(CACHE_ADDONS_EXTRACTED_DIR)
+    except Exception as exc:
+        print(f"    │       {C.RED}✖ Failed to extract '{zip_filename}': {exc}{C.RESET}")
+        return None
+
+    final_scan_dir = extracted_target_dir if os.path.isdir(extracted_target_dir) else os.path.join(CACHE_ADDONS_EXTRACTED_DIR, dep_name)
+    zip_link = make_clickable_file_link(final_zip_path, color=C.WHITE, display_text=zip_filename)
+    dir_link = make_clickable_file_link(final_scan_dir, color=C.CYAN)
+    print(
+        f"    │       {C.GREEN}✔ Cached {online_ver_disp}{C.RESET} | ZIP: {zip_link} | Extracted: {dir_link}"
+    )
+    return final_scan_dir if os.path.isdir(final_scan_dir) else None
+
+def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, current_addon_id=None):
     """Maps dependency globals to '/live/AddOns/<Dep>/<Subdir>/<File>:<Line>' from ESO_ADDONS_DIR."""
     if not ESO_ADDONS_DIR or not os.path.isdir(ESO_ADDONS_DIR):
         return {}
@@ -611,6 +769,7 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
     global LOCAL_ADDONS_MANIFEST_INDEX
     dep_names = []
     checked_addon_names = set()
+    bundled_sub_dirs = {}
     if active_extract_dir and os.path.exists(active_extract_dir):
         for root, _, files in os.walk(active_extract_dir):
             for f in files:
@@ -620,7 +779,9 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                         with open(full_mf, 'r', encoding='utf-8', errors='ignore') as fh:
                             mf_text = fh.read()
                         if re.search(r'^\s*##\s*(?:Title|AddOnVersion)\s*:', mf_text, flags=re.MULTILINE | re.IGNORECASE):
-                            checked_addon_names.add(os.path.splitext(f)[0].lower())
+                            stem_name, _ = os.path.splitext(f)
+                            checked_addon_names.add(stem_name.lower())
+                            bundled_sub_dirs[stem_name.lower()] = (stem_name, root)
                         found_deps, _ = parse_manifest_dependencies(mf_text)
                         for d in found_deps:
                             if d not in dep_names:
@@ -768,13 +929,18 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
                             continue
                         if entry.startswith('#') or entry.startswith(';') or '$(' in entry:
                             continue
-                        rel_file = entry.replace('/', os.sep).replace('\\', os.sep)
+                        norm_entry = entry.replace('\\', '/')
+                        if _is_pc_ignored_rel_path(norm_entry):
+                            continue
+                        rel_file = norm_entry.replace('/', os.sep)
                         target_file = os.path.join(folder_path, rel_file)
                         if os.path.isfile(target_file):
-                            short_rel_display = f"/{folder_label}/{entry.replace('\\', '/')}"
+                            short_rel_display = f"/{folder_label}/{norm_entry}"
                             if _is_excluded_dependency_file(short_rel_display):
                                 continue
-                            rel_display = f"/live/AddOns{short_rel_display}"
+                            is_cached_src = os.path.abspath(folder_path).startswith(os.path.abspath(CACHE_ADDONS_EXTRACTED_DIR))
+                            rel_display = f"/Cache/AddOns/_extracted{short_rel_display}" if is_cached_src else f"/live/AddOns{short_rel_display}"
+
                             _update_scan_spinner(short_rel_display)
 
                             with open(target_file, 'r', encoding='utf-8', errors='ignore') as tf:
@@ -816,17 +982,51 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn):
         cache_dirty = True
         return dep_globals
 
+    from src.esoui_filelist_search import compare_version_values, resolve_dependency_online_package
+
+    cur_id_str = str(current_addon_id).strip() if current_addon_id is not None else ""
     scanned_lowers = set(checked_addon_names) | excluded_folders_lower
     for dep in dep_names:
         low_d = dep.lower()
         if low_d in excluded_folders_lower:
             continue
         scanned_lowers.add(low_d)
+        if low_d in bundled_sub_dirs:
+            b_name, b_dir = bundled_sub_dirs[low_d]
+            all_dep_globals.update(_get_or_scan_addon_folder(f"bundled:{b_name}", b_dir))
+            continue
+
         if low_d in LOCAL_ADDONS_MANIFEST_INDEX:
             orig_name, dep_dir, _ = LOCAL_ADDONS_MANIFEST_INDEX[low_d]
         else:
             orig_name, dep_dir = dep, os.path.join(ESO_ADDONS_DIR, dep)
-        all_dep_globals.update(_get_or_scan_addon_folder(orig_name, dep_dir))
+
+        online_pkg = resolve_dependency_online_package(orig_name)
+        use_cached_dir = None
+        if online_pkg and (not cur_id_str or str(online_pkg.get("addon_id") or "").strip() != cur_id_str):
+            if not os.path.isdir(dep_dir):
+                use_cached_dir = _ensure_cached_dependency_addon(orig_name, online_pkg, "not installed in live/AddOns")
+            else:
+                loc_ver = _read_manifest_version_info(dep_dir, expected_stem=orig_name)
+                rem_av = online_pkg.get("add_on_version")
+                loc_av = loc_ver.get("add_on_version") if loc_ver else None
+                is_outdated = False
+                reason_msg = ""
+                if rem_av is not None and loc_av is not None and loc_av < rem_av:
+                    is_outdated = True
+                    reason_msg = f"local AddOnVersion {loc_av} < online {rem_av}"
+                elif rem_av is None and loc_ver:
+                    rem_vs = online_pkg.get("version_str") or ""
+                    loc_vs = loc_ver.get("version_str") or ""
+                    if rem_vs and loc_vs and compare_version_values(loc_vs, rem_vs) < 0:
+                        is_outdated = True
+                        reason_msg = f"local Version '{loc_vs}' < online '{rem_vs}'"
+                if is_outdated:
+                    use_cached_dir = _ensure_cached_dependency_addon(orig_name, online_pkg, reason_msg)
+
+        scan_target_dir = use_cached_dir if use_cached_dir else dep_dir
+        scan_cache_key = f"cache:{orig_name}" if use_cached_dir else orig_name
+        all_dep_globals.update(_get_or_scan_addon_folder(scan_cache_key, scan_target_dir))
 
     for low_name, (orig_name, folder_path, _) in sorted(LOCAL_ADDONS_MANIFEST_INDEX.items()):
         if low_name in scanned_lowers:
