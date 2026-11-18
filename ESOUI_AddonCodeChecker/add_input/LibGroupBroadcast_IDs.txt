@@ -180,7 +180,7 @@ Simply pick the next free id, update your code accordingly and edit this wiki pa
 | no
 | For sharing information in PvE content
 | -
-| TBD
+| CurseExplosionProtocol
 |-
 | [https://www.esoui.com/downloads/fileinfo.php?id=4263#info%20-Call-I-Do.html Call I Do]
 | [https://www.esoui.com/downloads/author-80438.html Lebiez]
@@ -730,7 +730,7 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Shares Lucent Citadel mirror assignments between Rytic Combat & Raid Tools and Wifey DPS Positions.
 | Rytic Combat & Raid Tools
 |-
-| colspan="4" | ''190-199 reserved for Radiant Range''
+| colspan="4" | ''190-191 Radiant Range; 192 Wifey Pack; 193-194 reserved for Radiant Range''
 |-
 | 190
 | RadiantRangeGroupState
@@ -741,6 +741,11 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | RadiantRangeConeHeading
 | Shares facing/heading data for group members using Radiant Range's Cone display.
 | Radiant Range
+|-
+| 192
+| WifeyPackIconSharing
+| Shares overhead icon assignments between group members using Wifey Pack.
+| Wifey Pack
 |-
 | colspan="4" | ''200 reserved for FOX Metrica''
 |-
@@ -754,7 +759,6 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Diagnostic presence/transport readiness and sharing OFF flags for group members.
 | FOX Metrica
 |-
-|-
 | 203
 | FOXM_GroupSignalRez
 | Resurrection protocol: share local resurrection phase. This is used to notify group members of resurrection status changes.
@@ -762,7 +766,12 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 |-
 | colspan="4" | ''204-209 reserved for FOX Metrica''
 |-
-| colspan="4" | ''210-219 reserved for CrutchAlerts''
+| 210
+| CurseExplosionProtocol
+| Sends position and direction of group members' Bahsei curses.
+| CrutchAlerts
+|-
+| colspan="4" | ''211 reserved for CrutchAlerts''
 |-
 | colspan="4" | ''220-229 reserved for Beltalowda''
 |-
