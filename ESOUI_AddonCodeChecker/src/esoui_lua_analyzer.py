@@ -1364,6 +1364,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
         global_tables
         | set(addon_ctx.get("saved_variables", set()))
         | set(ESOUI_GLOBAL_DEFINES)
+        | set(ESOUI_RAM_DICTIONARY.keys())
         | ESOUI_UNDOCUMENTED_SET
         | LUA_STD_LIBS
     )

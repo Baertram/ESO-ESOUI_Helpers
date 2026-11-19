@@ -109,11 +109,11 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_s
                 manifest_issues.append(
                     f"Invalid delimiter in OptionalDependsOn (line {line_num}): Use spaces instead of commas or semicolons (-- {line_str})."
                 )
-            for dep in opt_part.split():
-                if ">=" in dep:
-                    manifest_issues.append(
-                        f"Invalid '>=' operator in OptionalDependsOn (line {line_num}): Version checks are NOT supported here (-- {line_str})."
-                    )
+            bad_opt_deps = [dep for dep in opt_part.split() if ">=" in dep]
+            if bad_opt_deps:
+                manifest_issues.append(
+                    f"Invalid '>=' operator in OptionalDependsOn (line {line_num}): Version checks are NOT supported here (-- {' '.join(bad_opt_deps)})."
+                )
 
 def analyze_manifest_file(file_name, content, ext, addon_ctx):
     manifest_issues = []
