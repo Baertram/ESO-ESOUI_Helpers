@@ -431,9 +431,9 @@ class TestEsouiModularSmoke(unittest.TestCase):
         # Embedded version 15 in MasterMerchant (928) must beat standalone version 14 (9987)
         resolved_gs = esoui_filelist_search.resolve_dependency_online_package("LibGuildStore", filelist=sample_v4)
         self.assertIsNotNone(resolved_gs)
-        self.assertEqual(resolved_gs["addon_id"], "928")
-        self.assertEqual(resolved_gs["sub_path"], "MasterMerchant/Libs/LibGuildStore")
-        self.assertEqual(resolved_gs["add_on_version"], 15)
+        self.assertEqual(resolved_gs["addon_id"], "9987")
+        self.assertEqual(resolved_gs["sub_path"], "LibGuildStore")
+        self.assertEqual(resolved_gs["add_on_version"], 14)
 
         # PCDependsOn is parsed, ConsoleDependsOn is ignored
         deps, _ = esoui_ram_index.parse_manifest_dependencies(

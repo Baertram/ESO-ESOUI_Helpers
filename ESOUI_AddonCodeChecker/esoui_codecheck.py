@@ -31,9 +31,11 @@ from src.esoui_download_io import (
 )
 from src.esoui_ai_and_report import (
     handle_search_command,
+    is_bp_multi_globals_enabled,
     print_addon_metadata,
     process_addon,
     process_latest_filelist_in_chunks,
+    toggle_bp_multi_globals,
 )
 
 
@@ -110,6 +112,8 @@ def main_cli():
     print(f"  - {C.WHITE}Latest Addons{C.RESET}   : [force] last <1..{ESOUI_LATEST_MAX_ITEMS}> (e.g. last 2-5, force last 1, 3, 7)")
     print(f"  - {C.WHITE}Search Addons{C.RESET}   : [force] search <q1, q2> | search dep <d1, d2> | search author <a1, a2> | search api <v1, !v2>")
     print(f"  - {C.WHITE}Repeat Last{C.RESET}     : [force] repeat | repeat dl | repeat search")
+    bp_state_lbl = f"{C.GREEN}ON{C.RESET}" if is_bp_multi_globals_enabled() else f"{C.YELLOW}OFF{C.RESET}"
+    print(f"  - {C.WHITE}List multiple used globals{C.RESET}: bpglobal (toggle report section, default: {bp_state_lbl})")
     print(f"  - {C.WHITE}Cleanup{C.RESET}         : clear cache | clear cache addons | clear zips [YYMMDD] | clear reports [YYMMDD]")
     print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop a .zip archive or a .txt batch list\n")
     os.makedirs(BASE_FOLDER, exist_ok=True)
@@ -119,7 +123,7 @@ def main_cli():
 
     while True:
         raw = read_cli_input_with_esc(
-            f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'repeat ...', 'clear ...', .zip/.txt, or ESC/'exit'): "
+            f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'repeat ...', 'bpglobal', 'clear ...', .zip/.txt, or ESC/'exit'): "
         ).strip()
         if raw == "__ESC__" or raw.lower() == "exit":
             print("Exiting. Have a great day!")
@@ -129,9 +133,15 @@ def main_cli():
 
         clean = raw.strip('"').strip("'").strip()
 
-        # 'clear' is never stored in repeat history
+        # 'clear' and 'bpglobal' are never stored in repeat history
         if re.match(r'^clear(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
             handle_clear_command(clean[5:].strip())
+            continue
+
+        if clean.lower() == "bpglobal" and not os.path.exists(clean):
+            new_state = toggle_bp_multi_globals()
+            state_txt = f"{C.GREEN}ON{C.RESET}" if new_state else f"{C.YELLOW}OFF{C.RESET}"
+            print(f"{C.CYAN}-> Best practice section 'Global variable used multiple times w/o a local reference' is now:{C.RESET} {state_txt}\n")
             continue
 
         force_flag = False
