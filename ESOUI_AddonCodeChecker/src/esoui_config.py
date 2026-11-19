@@ -18,7 +18,7 @@ ZIP_FOLDER = os.path.join(BASE_FOLDER, "Zips")
 EXTRACT_FOLDER = os.path.join(BASE_FOLDER, "Tmp")
 REPORTS_BASE_DIR = os.path.join(BASE_FOLDER, "_Reports")
 
-ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.md', '.license', '.bbcode'}
+ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.slug', '.font', '.md', '.license', '.bbcode'}
 ALLOWED_DOC_STEMS = {'readme', 'license', 'licence', 'copying', 'copyright', 'changelog', 'changes'}
 BLOCKED_EXECUTABLE_EXTENSIONS = {
     '.exe', '.bat', '.cmd', '.com', '.ps1', '.vbs', '.vbe', '.js', '.jse',
@@ -29,6 +29,11 @@ BLOCKED_EXECUTABLE_EXTENSIONS = {
 FORBIDDEN_KEYWORDS = {'.github', '.vs', '.idea', '.git'}
 FORBIDDEN_OS_JUNK_NAMES = {"__macosx", "thumbs.db", "desktop.ini", ".ds_store"}
 EXCLUDED_DEPENDENCY_ADDON_FOLDERS = {"DumpVars"}
+# Add-on titles / IDs (lowercase) whose embedded sub-libraries must NEVER be resolved as dependencies for other add-ons
+EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS = frozenset({
+    "fcoaccessibility",
+    "3586",
+})
 # Relative paths or fnmatch wildcard patterns inside ESO_ADDONS_DIR to skip during dependency scanning
 EXCLUDED_DEPENDENCY_FILES = {
     "/TamrielTradeCentre/PriceTable*.lua",

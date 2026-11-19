@@ -787,9 +787,15 @@ def collect_addon_context(extract_dir):
                 if lower_f.endswith((".addon", ".txt")):
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as sub_mf:
-                            sub_head = sub_mf.read(2048)
-                        if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", sub_head, flags=re.MULTILINE | re.IGNORECASE):
+                            sub_text = sub_mf.read()
+                        if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", sub_text, flags=re.MULTILINE | re.IGNORECASE):
                             bundled_sub_addons.add(os.path.splitext(f)[0].lower())
+                            for m_line in sub_text.splitlines():
+                                sv_match = re.match(r"^\s*##\s*SavedVariables\s*:\s*(.+)$", m_line.strip(), flags=re.IGNORECASE)
+                                if sv_match:
+                                    sv_rhs = re.split(r"[#;]", sv_match.group(1), maxsplit=1)[0]
+                                    for sv_name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", sv_rhs):
+                                        saved_variables.add(sv_name)
                     except Exception:
                         pass
                 if f.lower() == "bindings.xml":
@@ -1546,9 +1552,11 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         for f in files if f.lower().endswith('.lua')
     )
 
-    dep_globals_map = collect_dependency_globals(
-        active_extract_dir, extract_globals_from_lua_source, current_addon_id=addon_ctx.get("current_addon_id")
-    )
+    if "dep_globals_map" not in addon_ctx:
+        addon_ctx["dep_globals_map"] = collect_dependency_globals(
+            active_extract_dir, extract_globals_from_lua_source, current_addon_id=addon_ctx.get("current_addon_id")
+        )
+    dep_globals_map = addon_ctx["dep_globals_map"]
     dep_globals_set = set(dep_globals_map.keys())
 
     lua_issues = []

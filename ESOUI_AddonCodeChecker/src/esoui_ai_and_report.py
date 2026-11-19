@@ -394,6 +394,7 @@ def _check_zip_structure(zip_path, report_data):
     forbidden_entries = []
     disallowed_by_ext = defaultdict(list)
     dds_textures = []
+    legacy_font_files = []
     non_addon_files = []
     flagged_paths = set()
     manifest_paths = set()
@@ -441,6 +442,8 @@ def _check_zip_structure(zip_path, report_data):
                 is_doc_or_license = (base_stem in ALLOWED_DOC_STEMS) or (entry_ext in {'.md', '.license', '.bbcode'})
                 if entry_ext == '.dds':
                     dds_textures.append(normalized)
+                elif entry_ext == '.font':
+                    legacy_font_files.append(normalized)
                 elif is_doc_or_license:
                     pass
                 elif entry_ext in BLOCKED_EXECUTABLE_EXTENSIONS:
@@ -465,6 +468,13 @@ def _check_zip_structure(zip_path, report_data):
                     print(f"    │     - {tex}")
             else:
                 print("    ├── Textures (.dds): None")
+
+            if legacy_font_files:
+                print(f"    ├── {C.YELLOW}Legacy font files (.font) found ({len(legacy_font_files)}) - Best practice: Migrate to slug file:{C.RESET}")
+                for fnt in sorted(legacy_font_files):
+                    print(f"    │     - {fnt} (Best practice: Migrate to slug file)")
+                for fnt in sorted(legacy_font_files):
+                    report_data["best_practices"]["Possible action: Please consider migrating the font files to slug files"].append((fnt, None, ""))
 
             if non_addon_files:
                 has_any_critical = any(is_crit for _, is_crit in non_addon_files)

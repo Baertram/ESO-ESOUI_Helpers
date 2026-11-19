@@ -526,19 +526,22 @@ def annotate_depends_on_line(
 
 
 def _version_to_tuple(ver_val: Any) -> Tuple[int, ...]:
-    """Extrahiert alle Zahlengruppen aus einer AddOnVersion oder einem Version-String als Vergleichs-Tupel."""
+    """Wandelt nur reine Zahlen ('43') oder punktgetrennte Versionen ('3.8.34') in ein Zahlen-Tupel um."""
     if ver_val is None:
         return ()
     if isinstance(ver_val, int):
         return (ver_val,)
-    nums = re.findall(r"\d+", str(ver_val))
-    return tuple(int(n) for n in nums)
+    clean = str(ver_val).strip()
+    if not re.match(r"^\d+(?:\.\d+)*$", clean):
+        return ()
+    return tuple(int(part) for part in clean.split("."))
 
 
 def compare_version_values(local_ver: Any, remote_ver: Any) -> int:
     """
-    Vergleicht zwei Versionswerte (int AddOnVersion oder str Version):
-    Gibt -1 zurück wenn local_ver < remote_ver, 0 wenn gleich, 1 wenn local_ver > remote_ver.
+    Vergleicht zwei Versionswerte:
+    Numerisch nur bei Ganzzahlen ('43') oder rein punktgetrennten Nummern ('3.8.34').
+    Bei Freitext-Versionen ('2.0 r43') wird 0 zurückgegeben (kein Raten).
     """
     if isinstance(local_ver, int) and isinstance(remote_ver, int):
         return -1 if local_ver < remote_ver else (1 if local_ver > remote_ver else 0)
@@ -549,10 +552,7 @@ def compare_version_values(local_ver: Any, remote_ver: Any) -> int:
         p_loc = t_loc + (0,) * (max_len - len(t_loc))
         p_rem = t_rem + (0,) * (max_len - len(t_rem))
         return -1 if p_loc < p_rem else (1 if p_loc > p_rem else 0)
-    s_loc = str(local_ver or "").strip().lower()
-    s_rem = str(remote_ver or "").strip().lower()
-    return -1 if s_loc < s_rem else (1 if s_loc > s_rem else 0)
-
+    return 0
 
 def resolve_dependency_online_package(
     dep_name: str,
@@ -573,6 +573,8 @@ def resolve_dependency_online_package(
 
     candidates: List[Tuple[int, Tuple[int, ...], int, int, Dict[str, Any]]] = []
 
+    from src.esoui_config import EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS
+
     for entry in items:
         if not _is_live_addon(entry) or is_discontinued_or_outdated(entry):
             continue
@@ -580,6 +582,10 @@ def resolve_dependency_online_package(
         if not addon_id:
             continue
         pkg_title = _extract_title(entry)
+        skip_embedded_for_pkg = (
+            addon_id.lower() in EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS
+            or pkg_title.lower() in EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS
+        )
         pkg_ver_str = _extract_version(entry)
         pkg_addon_ver = _parse_numeric_addon_version(
             entry.get("addOnVersion") if entry.get("addOnVersion") is not None else entry.get("addonVersion")
@@ -603,13 +609,15 @@ def resolve_dependency_online_package(
                         names_to_check.add(stem.rsplit("/", 1)[-1])
 
                 if target in names_to_check:
+                    sub_path = raw_path if raw_path else dep_name.strip()
+                    is_embedded = "/" in sub_path
+                    if is_embedded and skip_embedded_for_pkg:
+                        continue
                     matched_sub = True
                     sub_ver = _parse_numeric_addon_version(
                         sub.get("addOnVersion") if sub.get("addOnVersion") is not None else sub.get("addonVersion")
                     )
                     eff_num_ver = sub_ver if sub_ver is not None else pkg_addon_ver
-                    sub_path = raw_path if raw_path else dep_name.strip()
-                    is_embedded = "/" in sub_path
                     has_num_av = 1 if eff_num_ver is not None else 0
                     ver_tuple = (eff_num_ver,) if eff_num_ver is not None else _version_to_tuple(pkg_ver_str)
                     standalone_bonus = 0 if is_embedded else 1
@@ -645,7 +653,7 @@ def resolve_dependency_online_package(
         return None
 
     candidates.sort(
-        key=lambda item: (item.__getitem__(0), item.__getitem__(1), item.__getitem__(2), item.__getitem__(3)),
+        key=lambda item: (item.__getitem__(2), item.__getitem__(0), item.__getitem__(1), item.__getitem__(3)),
         reverse=True,
     )
     _, _, _, _, best_info = next(iter(candidates))
