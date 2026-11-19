@@ -151,7 +151,7 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
         flags=re.DOTALL,
     )
     clean_xml = re.sub(
-        r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^>]*>.*?</\1>",
+        r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^/>]*>.*?</\1>",
         lambda m: "\n" * m.group(0).count("\n"),
         clean_xml,
         flags=re.DOTALL,
@@ -250,7 +250,7 @@ def _collect_xml_templates_from_source(x_txt, xml_template_children, inherited_t
     if not x_txt or ("$(parent)" not in x_txt and "inherits" not in x_txt):
         return
     clean_xml = re.sub(r"<!--.*?-->", "", x_txt, flags=re.DOTALL)
-    clean_xml = re.sub(r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^>]*>.*?</\1>", "", clean_xml, flags=re.DOTALL)
+    clean_xml = re.sub(r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^/>]*>.*?</\1>", "", clean_xml, flags=re.DOTALL)
     tag_rx = re.compile(r"<(/?)([A-Za-z_][A-Za-z0-9_:-]*)([^<>]*?)(/?)>", flags=re.DOTALL)
     name_rx = re.compile(r'\bname\s*=\s*["\']([^"\']+)["\']')
     virtual_rx = re.compile(r'\bvirtual\s*=\s*["\']true["\']', flags=re.IGNORECASE)
@@ -263,11 +263,11 @@ def _collect_xml_templates_from_source(x_txt, xml_template_children, inherited_t
         is_closing, tag_name, attrs, is_self_closing = m.groups()
         if is_closing:
             tag_depth = max(0, tag_depth - 1)
-            while active_templates and active_templates[-1].__getitem__(0) > tag_depth:
+            while active_templates and active_templates[-1].__getitem__(0) >= tag_depth:
                 active_templates.pop()
             for tpl_frame in active_templates:
                 rel_stack = tpl_frame.__getitem__(2)
-                while rel_stack and rel_stack[-1].__getitem__(0) > tag_depth:
+                while rel_stack and rel_stack[-1].__getitem__(0) >= tag_depth:
                     rel_stack.pop()
             continue
 
@@ -620,9 +620,6 @@ def build_esoui_index_once():
                                 ESOUI_RAM_DICTIONARY[cand_ctrl] = f"ESOUI Virtual Control ({rel_display}:{ln_no})"
 
                 file_count += 1
-                dt_file = (datetime.now() - t_file_start).total_seconds()
-                if dt_file > 0.25:
-                    print(f"{C.YELLOW}       [DEBUG-RAM] Slow file ({dt_file:.2f}s): {rel_display}{C.RESET}", flush=True)
             except Exception:
                 pass
 

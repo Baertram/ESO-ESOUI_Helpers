@@ -780,6 +780,8 @@ def collect_addon_context(extract_dir):
                         pass
 
         bundled_sub_addons = set()
+        global_tables_by_file = defaultdict(set)
+        lua_texts_for_dyn_g = []
         for root, _, files in os.walk(extract_dir):
             for f in files:
                 lower_f = f.lower()
@@ -816,15 +818,28 @@ def collect_addon_context(extract_dir):
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as lf:
                             raw_lua_txt = lf.read()
+                        rel_f_norm = os.path.relpath(full_path, extract_dir).replace("\\", "/")
                         lua_clean = strip_lua_comments_preserve_lines(raw_lua_txt)
-                        tbl_matches = re.findall(
-                            r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{\}|\1\s*or\s*\{})',
-                            lua_clean,
-                            flags=re.MULTILINE,
-                        )
-                        for m in tbl_matches:
-                            if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', lua_clean):
-                                all_global_tables.add(m)
+                        lua_no_str = strip_lua_strings_preserve_lines(lua_clean)
+                        lua_texts_for_dyn_g.append((rel_f_norm, lua_clean))
+                        brace_depth = 0
+                        for ln_no, code_ln in enumerate(lua_no_str.splitlines(), 1):
+                            if brace_depth == 0:
+                                m_tbl = re.match(
+                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{)',
+                                    code_ln,
+                                )
+                                if m_tbl:
+                                    m_name = m_tbl.group(1)
+                                    if not re.search(r'\blocal\s+' + re.escape(m_name) + r'\b', lua_no_str):
+                                        all_global_tables.add(m_name)
+                                        global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
+                            brace_depth = max(0, brace_depth + code_ln.count("{") - code_ln.count("}"))
+                        for m_g in re.finditer(r'_G\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=', lua_clean):
+                            g_name = m_g.group(1)
+                            ln_no = lua_clean.count("\n", 0, m_g.start(1)) + 1
+                            all_global_tables.add(g_name)
+                            global_tables_by_file[rel_f_norm].add(f"{ln_no}: {g_name}")
                         rel_f = os.path.relpath(full_path, extract_dir).replace("\\", "/")
                         file_defined_globals = extract_globals_from_lua_source(raw_lua_txt, rel_f)
                         dynamic_globals.update(file_defined_globals.keys())
@@ -832,6 +847,34 @@ def collect_addon_context(extract_dir):
                             dynamic_globals.add(v_ctrl)
                     except Exception:
                         pass
+
+        dyn_wrapper_funcs = {}
+        func_def_rx = re.compile(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(([^)]*)\)')
+        for _, l_txt in lua_texts_for_dyn_g:
+            for fm in func_def_rx.finditer(l_txt):
+                fn_name = fm.group(1)
+                params = [p.strip() for p in fm.group(2).split(",") if p.strip()]
+                _, fn_body = _extract_lua_function_body_from_offset(l_txt, fm.start())
+                for p_idx, p_name in enumerate(params):
+                    if re.search(r'\b_G\[\s*' + re.escape(p_name) + r'\s*\]\s*=', fn_body):
+                        dyn_wrapper_funcs[fn_name] = p_idx
+                        dyn_wrapper_funcs[fn_name.split(".")[-1].split(":")[-1]] = p_idx
+                        break
+
+        for rel_f_norm, l_txt in lua_texts_for_dyn_g:
+            for fn_name, p_idx in dyn_wrapper_funcs.items():
+                call_rx = re.compile(r'\b' + re.escape(fn_name) + r'\s*\(')
+                for cm in call_rx.finditer(l_txt):
+                    args_raw, _ = _extract_balanced_call_args(l_txt, cm.end() - 1)
+                    if args_raw:
+                        args = _split_top_level_lua_args(args_raw)
+                        if p_idx < len(args):
+                            str_m = re.match(r'^["\']([A-Za-z_][A-Za-z0-9_]*)["\']$', args[p_idx].strip())
+                            if str_m:
+                                w_name = str_m.group(1)
+                                ln_no = l_txt.count("\n", 0, cm.start()) + 1
+                                all_global_tables.add(w_name)
+                                global_tables_by_file[rel_f_norm].add(f"{ln_no}: {w_name}")
 
         for m_file in root_addon_manifests + root_txt_manifests:
             m_path = os.path.join(manifest_root_dir, m_file)
@@ -855,6 +898,7 @@ def collect_addon_context(extract_dir):
         "root_addon_manifests": root_addon_manifests,
         "root_txt_manifests": root_txt_manifests,
         "bundled_sub_addons": bundled_sub_addons,
+        "global_tables_by_file": dict(global_tables_by_file),
     }
 def _collect_lua_local_identifiers(code_only):
     """Collects local variables, function parameters, and loop variables in a Lua file."""
@@ -1139,6 +1183,8 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
         if not cb_params or not cb_body:
             continue
 
+        applied_filter_types = {ft for pairs in matching_handles for ft, _ in pairs}
+
         for pairs in matching_handles:
             for f_type, f_val in pairs:
                 p_idx = FILTER_TYPE_PARAM_INDEX.get((ev_name, f_type))
@@ -1159,6 +1205,44 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
                             f"{rule_title}: {ev_name} (line {line_no}) "
                             f"({orig_line} -- redundant '{param_var}' check in callback despite {f_type}={f_val})"
                         )
+
+        if (
+            {"REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX"} & allowed_filters
+            and not ({"REGISTER_FILTER_UNIT_TAG", "REGISTER_FILTER_UNIT_TAG_PREFIX"} & applied_filter_types)
+        ):
+            sig = ESOUI_EVENT_PARAM_TYPES.get(ev_name, [])
+            unit_p_idx = None
+            for s_idx, (s_type, s_name) in enumerate(sig, 1):
+                if "unittag" in s_name.lower() or "unittag" in s_type.lower():
+                    unit_p_idx = s_idx
+                    break
+            if unit_p_idx is not None and unit_p_idx < len(cb_params):
+                u_var = cb_params[unit_p_idx]
+                if u_var and u_var != "_":
+                    esc_u = re.escape(u_var)
+                    has_prefix_match = bool(
+                        re.search(
+                            rf'\b(?:{esc_u}\s*:\s*(?:match|find)|(?:string\.(?:match|find)|zo_strfind)\s*\(\s*{esc_u}\b)',
+                            cb_body,
+                        )
+                    )
+                    has_exact_eq = bool(
+                        re.search(
+                            rf'(?:\b{esc_u}\s*(?:==|~=)\s*["\'][^"\']+["\']|["\'][^"\']+["\']\s*(?:==|~=)\s*\b{esc_u}\b)',
+                            cb_body,
+                        )
+                    )
+                    if has_prefix_match:
+                        lua_issues.append(
+                            f"{rule_title}: {ev_name} (line {line_no}) "
+                            f"({orig_line} -- Use REGISTER_FILTER_UNIT_TAG_PREFIX instead of filtering '{u_var}' in Lua)"
+                        )
+                    elif has_exact_eq:
+                        lua_issues.append(
+                            f"{rule_title}: {ev_name} (line {line_no}) "
+                            f"({orig_line} -- Use REGISTER_FILTER_UNIT_TAG instead of checking '{u_var}' in Lua)"
+                        )
+
 def _check_lua_ai_slop_patterns(content, raw_lines):
     """Detects defensive pcall() and unnecessary 'if ESO_GLOBAL then' existence checks."""
     if not is_index_built():
@@ -1240,12 +1324,16 @@ def _build_line_local_scopes(code_only):
 
         line_scopes.append(set().union(*active_scopes))
 
-        if stripped.startswith("local ") and not stripped.startswith("local function"):
-            decl = stripped[6:].split("=", 1)[0]
-            for v in decl.split(","):
+        for loc_m in re.finditer(
+            r'\blocal\s+(?!function\b)([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)',
+            stripped,
+        ):
+            for v in loc_m.group(1).split(","):
                 clean_v = v.strip()
                 if clean_v:
                     active_scopes[-1].add(clean_v)
+            if ";" in line[loc_m.end():]:
+                line_scopes[-1].update(active_scopes[-1])
 
         for bm in block_rx.finditer(line):
             b_open, b_close = bm.groups()
@@ -1441,7 +1529,7 @@ def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, a
             "or make the loaded messages opt-in for the interested-in users (via slash_command and/or settings menu):\n"
             + formatted
         )
-def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=None):
+def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=None, file_name=""):
     """Checks global table pollution, multiple global tables, global functions, and local aliases."""
     lua_suggestions = []
     has_bindings_xml = addon_ctx["has_bindings_xml"]
@@ -1452,11 +1540,19 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
         build_esoui_index_once()
 
     if len(addon_ctx["all_global_tables"]) > 1:
-        sorted_globals = ", ".join(sorted(addon_ctx["all_global_tables"]))
-        lua_issues.append(
-            f"Multiple Global Addon Tables: Found {len(addon_ctx['all_global_tables'])} global tables across the addon ({sorted_globals}). "
-            "Only ONE global table per addon is allowed; attach sub-tables to your main addon table instead!"
-        )
+        norm_fn = file_name.replace("\\", "/")
+        raw_file_tbls = (addon_ctx.get("global_tables_by_file") or {}).get(norm_fn, set())
+        if raw_file_tbls:
+            sorted_globals = ", ".join(sorted(addon_ctx["all_global_tables"]))
+            file_tbls = sorted(
+                raw_file_tbls,
+                key=lambda s: (int(s.split(":", 1)[0]) if ":" in s and s.split(":", 1)[0].isdigit() else 0, s),
+            )
+            detail_suffix = f" ({', '.join(file_tbls)})"
+            lua_issues.append(
+                f"Multiple Global Addon Tables: Found {len(addon_ctx['all_global_tables'])} global tables across the addon ({sorted_globals}). "
+                f"Only ONE global table per addon is allowed; attach sub-tables to your main addon table instead!{detail_suffix}"
+            )
     func_def_rx = re.compile(r'^(?!local\s)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
     for idx, c_line in enumerate(clean_lines_list, 1):
         fm = func_def_rx.match(c_line)
@@ -1471,7 +1567,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                     f"Keep '{g_func}()' local or attach it to your single addon table (-- {orig})"
                 )
 
-    raw_table_matches = re.findall(r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{\}|\1\s*or\s*\{})', comment_free_lua, flags=re.MULTILINE)
+    raw_table_matches = re.findall(r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{)', comment_free_lua, flags=re.MULTILINE)
     global_table_matches = [
         m for m in dict.fromkeys(raw_table_matches)
         if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', comment_free_lua)
@@ -1574,7 +1670,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, addon_ctx, lua_issues)
     _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=move_to_table_hits)
     lua_suggestions = _check_lua_global_tables_and_locals(
-        comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=dep_globals_set
+        comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=dep_globals_set, file_name=file_name
     )
     if move_to_table_hits:
         formatted_mtt = "\n".join(f"    {ln}: --{orig}" for ln, orig in move_to_table_hits)
@@ -1582,7 +1678,8 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
             "Move to your global addon table instead:\n" + formatted_mtt
         )
 
-    _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx)
+    # Disabled for now due to false-positives on valid error/status notices during load:
+    # _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx)
     ai_slop_block = _check_lua_ai_slop_patterns(content, raw_lines)
 
     if lua_issues:

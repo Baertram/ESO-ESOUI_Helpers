@@ -76,6 +76,19 @@ except ImportError:
 
 client = Client(host=OLLAMA_HOST)
 OLLAMA_PREFLIGHT_CACHE = None
+SHOW_BP_MULTI_GLOBALS = False
+
+
+def is_bp_multi_globals_enabled():
+    """Returns whether the 'Global variable used multiple times w/o a local reference' report section is enabled."""
+    return bool(SHOW_BP_MULTI_GLOBALS)
+
+
+def toggle_bp_multi_globals():
+    """Toggles SHOW_BP_MULTI_GLOBALS for the current CLI session and returns the new boolean state."""
+    global SHOW_BP_MULTI_GLOBALS
+    SHOW_BP_MULTI_GLOBALS = not SHOW_BP_MULTI_GLOBALS
+    return SHOW_BP_MULTI_GLOBALS
 
 
 def _format_colored_api_version(api_str, current_api=None, base_color=""):
@@ -396,6 +409,7 @@ def _check_zip_structure(zip_path, report_data):
     dds_textures = []
     legacy_font_files = []
     non_addon_files = []
+    unreferenced_txt_files = []
     flagged_paths = set()
     manifest_paths = set()
     seen_hidden_dirs = set()
@@ -455,6 +469,8 @@ def _check_zip_structure(zip_path, report_data):
                         text_preview = zip_ref.read(entry).decode('utf-8', errors='ignore')
                         if re.search(r'^\s*##\s*(?:Title|AddOnVersion)\s*:', text_preview, flags=re.MULTILINE | re.IGNORECASE):
                             manifest_paths.add(normalized)
+                        elif entry_ext == '.txt':
+                            unreferenced_txt_files.append((f"{normalized} (missing '## Title:' / '## AddOnVersion:' manifest tag)", False))
                         else:
                             non_addon_files.append((f"{normalized} (missing '## Title:' / '## AddOnVersion:' manifest tag)", False))
                     except Exception:
@@ -462,6 +478,10 @@ def _check_zip_structure(zip_path, report_data):
 
                 if not is_doc_or_license and entry_ext not in ALLOWED_EXTENSIONS:
                     disallowed_by_ext[entry_ext].append(normalized)
+
+            if not manifest_paths and unreferenced_txt_files:
+                non_addon_files.extend(unreferenced_txt_files)
+
             if dds_textures:
                 print(f"    ├── {C.CYAN}Textures (.dds) found ({len(dds_textures)}):{C.RESET}")
                 for tex in sorted(dds_textures):
@@ -829,6 +849,12 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 )
                 continue
 
+            if item_text.startswith("Multiple Global Addon Tables:"):
+                m_multi = re.search(r'\(([^()]+)\)\s*$', item_text)
+                tbl_detail = m_multi.group(1).strip() if m_multi else ""
+                report_data["critical"][category]["Multiple Global Addon Tables"].append((rel_norm, None, tbl_detail))
+                continue
+
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
             code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
@@ -883,8 +909,11 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 m_slop = re.match(r'^(\d+)(?:\s*\(([^)]+)\))?:\s*--\s*(.*)$', slop_item)
                 if m_slop:
                     ln_no, ident_info, c_txt = m_slop.group(1), m_slop.group(2), m_slop.group(3).strip()
-                    loc_label = f"{rel_norm}:{ln_no} ({ident_info})" if ident_info else f"{rel_norm}:{ln_no}"
-                    report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
+                    if report_data["_last_slop_rule"] == "Possible action: Potential AI code - defensive pcall() usage (verify if needed)":
+                        report_data["best_practices"][report_data["_last_slop_rule"]].append((rel_norm, ln_no, c_txt))
+                    else:
+                        loc_label = f"{rel_norm}:{ln_no} ({ident_info})" if ident_info else f"{rel_norm}:{ln_no}"
+                        report_data["best_practices"][report_data["_last_slop_rule"]].append((loc_label, None, c_txt))
 
 
 def _harmonize_xsd_message(raw_msg):
@@ -1053,7 +1082,8 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         or any(bool(v) for v in report_data["critical"].values())
     )
     has_unverified = bool(unverified_entries)
-    has_bp = bool(report_data["best_practices"]) or bool(report_data.get("bp_grouped_globals"))
+    include_multi_globals = is_bp_multi_globals_enabled()
+    has_bp = bool(report_data["best_practices"]) or (include_multi_globals and bool(report_data.get("bp_grouped_globals")))
 
     if has_crit:
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="Red"{rb}{lb}FONT="Impact"{rb}Critical violations{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
@@ -1110,21 +1140,60 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{clean_xsd}{lb}/SIZE{rb}{lb}/spoiler{rb}' if clean_xsd else ""
                         out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 else:
+                    grouped_ev_filters = defaultdict(list)
+                    ev_order = []
+                    regular_entries = []
                     for f_path, ln_no, code_txt in entries:
                         if f_path.startswith("EVENT_FILTER::"):
                             _, ev_name, real_file = f_path.split("::", 2)
                             short_real = _strip_addon_root_prefix(real_file)
-                            header_loc = f"{short_real}:{ln_no}" if ln_no else short_real
-                            spoiler_body = f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}\n{code_txt}"
-                            out.append(
-                                f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
-                                f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
-                            )
+                            key = (ev_name, short_real)
+                            if key not in grouped_ev_filters:
+                                ev_order.append(key)
+                            grouped_ev_filters[key].append((ln_no, code_txt))
                         else:
-                            short_fp = _strip_addon_root_prefix(f_path)
-                            loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
-                            spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
-                            out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+                            regular_entries.append((f_path, ln_no, code_txt))
+
+                    for ev_name, short_real in ev_order:
+                        ev_hits = grouped_ev_filters[(ev_name, short_real)]
+                        by_line = defaultdict(list)
+                        line_order = []
+                        for ln_no, code_txt in ev_hits:
+                            if ln_no not in by_line:
+                                line_order.append(ln_no)
+                            if " -- " in code_txt:
+                                code_part, reason_part = code_txt.split(" -- ", 1)
+                            else:
+                                code_part, reason_part = code_txt, ""
+                            by_line[ln_no].append((code_part.strip(), reason_part.strip()))
+
+                        spoiler_sections = []
+                        for ln_no in line_order:
+                            header_loc = f"{short_real}:{ln_no}" if ln_no else short_real
+                            line_items = by_line[ln_no]
+                            base_code = next((c for c, _ in line_items if c), "")
+                            reasons = []
+                            for _, r_txt in line_items:
+                                if r_txt and r_txt not in reasons:
+                                    reasons.append(r_txt)
+                            sec_lines = [f"{lb}u{rb}{lb}b{rb}{header_loc}{lb}/b{rb}{lb}/u{rb}"]
+                            if base_code:
+                                sec_lines.append(base_code)
+                            for r_txt in reasons:
+                                sec_lines.append(f"- {r_txt}")
+                            spoiler_sections.append("\n".join(sec_lines))
+
+                        spoiler_body = "\n\n".join(spoiler_sections)
+                        out.append(
+                            f'{lb}*{rb} {lb}b{rb}{ev_name}{lb}/b{rb}\n'
+                            f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                        )
+
+                    for f_path, ln_no, code_txt in regular_entries:
+                        short_fp = _strip_addon_root_prefix(f_path)
+                        loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
+                        spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                        out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
 
             if has_cat_lgb:
@@ -1171,7 +1240,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                 out.append(f"{lb}*{rb} {loc}{spoiler_part}")
             out.append(f"{lb}/list{rb}")
 
-        grouped_globals = report_data.get("bp_grouped_globals")
+        grouped_globals = report_data.get("bp_grouped_globals") if include_multi_globals else None
         filtered_grouped_globals = defaultdict(dict)
         for var_name, files_dict in (grouped_globals or {}).items():
             for f_path, hits_list in files_dict.items():
@@ -1183,7 +1252,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             out.append(
                 f"{lb}u{rb}Global variable used multiple times w/o a local reference{lb}/u{rb}"
             )
-            out.append(f"{lb}list{rb}")
+            out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{lb}list{rb}')
             if int(compact_bp) >= 4:
                 per_file_vars = defaultdict(list)
                 for var_name in sorted(filtered_grouped_globals.keys(), key=lambda x: x.lower()):
@@ -1248,15 +1317,28 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                                 code_suffix = f" [i]({code_snip})[/i]" if code_snip else ""
                                 out.append(f"{lb}*{rb} {f_path}:{ln}{code_suffix}")
                     out.append(f"{lb}/list{rb}")
-            out.append(f"{lb}/list{rb}")
+            out.append(f"{lb}/list{rb}{lb}/SIZE{rb}{lb}/spoiler{rb}")
 
+        pcall_bp_rule = "Possible action: Potential AI code - defensive pcall() usage (verify if needed)"
         for bp_rule, entries in report_data["best_practices"].items():
             if bp_rule == outdated_dep_rule:
                 continue
             out.append("")
             out.append(f"{lb}u{rb}{bp_rule}{lb}/u{rb}")
             out.append(f"{lb}list{rb}")
-            if compact_bp and len(entries) > 1:
+            if bp_rule == pcall_bp_rule:
+                by_file = defaultdict(list)
+                for f_path, ln_no, code_txt in entries:
+                    by_file[_strip_addon_root_prefix(f_path)].append((ln_no, code_txt))
+                for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
+                    spoiler_lines = []
+                    for ln_no, code_txt in by_file[f_path]:
+                        prefix_ln = f"{ln_no}: " if ln_no else ""
+                        spoiler_lines.append(f"{prefix_ln}{code_txt}".strip())
+                    spoiler_body = "\n".join(spoiler_lines)
+                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}' if spoiler_body else ""
+                    out.append(f"{lb}*{rb} {f_path}{spoiler_part}")
+            elif compact_bp and len(entries) > 1:
                 by_file = defaultdict(list)
                 for f_path, ln_no, code_txt in entries:
                     by_file[_strip_addon_root_prefix(f_path)].append((ln_no, code_txt))
@@ -1286,6 +1368,40 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     return "\n".join(out).strip() + "\n"
 
 
+def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS):
+    """Trims oversized [spoiler] bodies first, then falls back to safe line-level truncation with [trunc.]."""
+    if len(rendered_text) <= max_chars:
+        return rendered_text
+
+    lb, rb = chr(91), chr(93)
+    spoiler_rx = re.compile(
+        rf'({re.escape(lb)}spoiler{re.escape(rb)}(?:{re.escape(lb)}SIZE="2"{re.escape(rb)})?)(.*?)((?:{re.escape(lb)}/SIZE{re.escape(rb)})?{re.escape(lb)}/spoiler{re.escape(rb)})',
+        flags=re.DOTALL,
+    )
+
+    def _shrink_spoilers(text_in, max_body_len):
+        def _repl(m):
+            head, body, tail = m.group(1), m.group(2), m.group(3)
+            if len(body) <= max_body_len:
+                return m.group(0)
+            cut = body[:max(0, max_body_len - 10)].rstrip()
+            return f"{head}{cut} [trunc.]{tail}"
+        return spoiler_rx.sub(_repl, text_in)
+
+    candidate = rendered_text
+    for body_cap in (600, 250, 100, 40):
+        candidate = _shrink_spoilers(candidate, body_cap)
+        if len(candidate) <= max_chars:
+            return candidate
+
+    suffix = "\n[trunc.]\n"
+    keep_len = max(0, max_chars - len(suffix))
+    cut_text = candidate[:keep_len]
+    if "\n" in cut_text:
+        cut_text = cut_text.rsplit("\n", 1)[0]
+    return cut_text.rstrip() + suffix
+
+
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
     """Writes the compact, grouped ESOUI BBCode report, auto-compacting until <= ESOUI_COMMENT_MAX_CHARS."""
     rendered = ""
@@ -1296,9 +1412,10 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
         if len(rendered) <= ESOUI_COMMENT_MAX_CHARS:
             break
 
+    rendered = _enforce_report_char_limit(rendered, ESOUI_COMMENT_MAX_CHARS)
+
     with open(report_file_path, "w", encoding="utf-8") as wf:
         wf.write(rendered)
-
 
 def process_addon(zip_path, zip_name):
     """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
