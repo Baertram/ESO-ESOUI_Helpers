@@ -132,6 +132,9 @@ def parse_event_signatures_from_api_doc(lines):
         ESOUI_EVENT_PARAM_TYPES[ev_name] = parsed_params
 
 
+_XML_TEMPLATE_EXPANSION_MEMO = {}
+
+
 def extract_resolved_xml_control_names(xml_text, template_children_map=None):
     """
     Resolves hierarchical ESO XML control names including $(parent), $(parentParent),
@@ -145,6 +148,12 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
         r"<!--.*?-->",
         lambda m: "\n" * m.group(0).count("\n"),
         xml_text,
+        flags=re.DOTALL,
+    )
+    clean_xml = re.sub(
+        r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^>]*>.*?</\1>",
+        lambda m: "\n" * m.group(0).count("\n"),
+        clean_xml,
         flags=re.DOTALL,
     )
 
@@ -174,23 +183,36 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
 
         return parent_token_rx.sub(_repl, raw_name)
 
-    def _expand_inherited_suffixes(base_tpl_name, visited=None):
-        if not template_children_map:
-            return set()
-        if visited is None:
-            visited = set()
-        if base_tpl_name in visited:
-            return set()
-        visited.add(base_tpl_name)
+    def _expand_inherited_suffixes(base_tpl_name, active_stack=None, depth=0):
+        if not template_children_map or depth > 4:
+            return ()
+        if base_tpl_name in _XML_TEMPLATE_EXPANSION_MEMO:
+            return _XML_TEMPLATE_EXPANSION_MEMO[base_tpl_name]
+        if active_stack is None:
+            active_stack = set()
+        if base_tpl_name in active_stack:
+            return ()
         entry = template_children_map.get(base_tpl_name)
         if not entry:
-            return set()
+            return ()
+        active_stack.add(base_tpl_name)
         if isinstance(entry, dict):
             result_suffixes = set(entry.get("children") or ())
             for parent_tpl in (entry.get("parents") or ()):
-                result_suffixes.update(_expand_inherited_suffixes(parent_tpl, visited))
-            return result_suffixes
-        return set(entry)
+                result_suffixes.update(_expand_inherited_suffixes(parent_tpl, active_stack, depth + 1))
+            for sub_prefix, sub_tpl in (entry.get("sub_inherits") or ()):
+                if len(result_suffixes) >= 500:
+                    break
+                for nested_sfx in _expand_inherited_suffixes(sub_tpl, active_stack, depth + 1):
+                    result_suffixes.add(f"{sub_prefix}{nested_sfx}")
+                    if len(result_suffixes) >= 500:
+                        break
+            frozen_res = tuple(result_suffixes)
+        else:
+            frozen_res = tuple(entry)
+        active_stack.remove(base_tpl_name)
+        _XML_TEMPLATE_EXPANSION_MEMO[base_tpl_name] = frozen_res
+        return frozen_res
 
     for m in tag_rx.finditer(clean_xml):
         is_closing, tag_name, attrs, is_self_closing = m.groups()
@@ -223,9 +245,12 @@ def extract_resolved_xml_control_names(xml_text, template_children_map=None):
     return resolved_list
 
 
-def _collect_xml_templates_from_source(x_txt, xml_template_children):
-    """Extracts virtual XML templates (regardless of attribute order), nested $(parent) children, and parent inherits."""
+def _collect_xml_templates_from_source(x_txt, xml_template_children, inherited_target_names=None):
+    """Extracts XML control/template $(parent) child hierarchies and inherits rapidly without backtracking."""
+    if not x_txt or ("$(parent)" not in x_txt and "inherits" not in x_txt):
+        return
     clean_xml = re.sub(r"<!--.*?-->", "", x_txt, flags=re.DOTALL)
+    clean_xml = re.sub(r"<(On[A-Za-z0-9_]+|UpdateFunction)\b[^>]*>.*?</\1>", "", clean_xml, flags=re.DOTALL)
     tag_rx = re.compile(r"<(/?)([A-Za-z_][A-Za-z0-9_:-]*)([^<>]*?)(/?)>", flags=re.DOTALL)
     name_rx = re.compile(r'\bname\s*=\s*["\']([^"\']+)["\']')
     virtual_rx = re.compile(r'\bvirtual\s*=\s*["\']true["\']', flags=re.IGNORECASE)
@@ -238,21 +263,34 @@ def _collect_xml_templates_from_source(x_txt, xml_template_children):
         is_closing, tag_name, attrs, is_self_closing = m.groups()
         if is_closing:
             tag_depth = max(0, tag_depth - 1)
-            while active_templates and active_templates[-1] > tag_depth:
+            while active_templates and active_templates[-1].__getitem__(0) > tag_depth:
                 active_templates.pop()
+            for tpl_frame in active_templates:
+                rel_stack = tpl_frame.__getitem__(2)
+                while rel_stack and rel_stack[-1].__getitem__(0) > tag_depth:
+                    rel_stack.pop()
             continue
 
         nm = name_rx.search(attrs)
         raw_name = nm.group(1).strip() if nm else ""
-        is_virt = bool(virtual_rx.search(attrs))
 
-        if active_templates and raw_name.startswith("$(parent)"):
-            rel_suffix = raw_name[len("$(parent)"):]
-            if re.match(r"^[A-Za-z0-9_]+$", rel_suffix):
-                for _, tpl_name in active_templates:
-                    xml_template_children.setdefault(tpl_name, {"children": set(), "parents": []})["children"].add(rel_suffix)
+        if active_templates and "$(parent)" in raw_name.lower():
+            inh_m_child = inherits_rx.search(attrs)
+            child_bases = [b.strip() for b in inh_m_child.group(1).split()] if inh_m_child else []
+            for _, tpl_name, rel_stack in active_templates:
+                parent_prefix = next((p_pfx for _, p_pfx in reversed(rel_stack) if p_pfx is not None), "")
+                resolved_rel = re.sub(r"\$\(parent\)", parent_prefix, raw_name, flags=re.IGNORECASE)
+                if re.match(r"^[A-Za-z0-9_]+$", resolved_rel):
+                    tpl_bucket = xml_template_children.setdefault(tpl_name, {"children": set(), "parents": [], "sub_inherits": []})
+                    tpl_bucket["children"].add(resolved_rel)
+                    for cb in child_bases:
+                        if cb:
+                            tpl_bucket.setdefault("sub_inherits", []).append((resolved_rel, cb))
+                    if not is_self_closing:
+                        rel_stack.append((tag_depth, resolved_rel))
 
-        if is_virt and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw_name):
+        is_target_tpl = bool(virtual_rx.search(attrs)) or bool(inherited_target_names and raw_name in inherited_target_names)
+        if is_target_tpl and raw_name and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw_name):
             tpl_entry = xml_template_children.setdefault(raw_name, {"children": set(), "parents": []})
             inh_m = inherits_rx.search(attrs)
             if inh_m:
@@ -261,7 +299,7 @@ def _collect_xml_templates_from_source(x_txt, xml_template_children):
                     if p_clean and p_clean not in tpl_entry["parents"]:
                         tpl_entry["parents"].append(p_clean)
             if not is_self_closing:
-                active_templates.append((tag_depth, raw_name))
+                active_templates.append((tag_depth, raw_name, [(tag_depth, "")]))
 
         if not is_self_closing:
             tag_depth += 1
@@ -488,9 +526,13 @@ def build_esoui_index_once():
             print(f"{C.RED}       Error indexing API doc: {str(e)}{C.RESET}")
 
     if os.path.exists(ESO_LIVE_SOURCE_DIR):
+        t_phase = datetime.now()
         file_count = 0
         xml_template_children = {}
         all_source_files = []
+        xml_texts_cache = []
+        inherited_target_names = set()
+        inherits_scan_rx = re.compile(r'\binherits\s*=\s*["\']([^"\']+)["\']')
         for root, _, files in os.walk(ESO_LIVE_SOURCE_DIR):
             for file in sorted(files):
                 if file.endswith(('.lua', '.xml')):
@@ -500,10 +542,21 @@ def build_esoui_index_once():
                         try:
                             with open(full_p, 'r', encoding='utf-8', errors='ignore') as xf:
                                 x_txt = xf.read()
-                            if 'virtual="true"' in x_txt or "virtual='true'" in x_txt:
-                                _collect_xml_templates_from_source(x_txt, xml_template_children)
+                            xml_texts_cache.append(x_txt)
+                            for im in inherits_scan_rx.finditer(x_txt):
+                                for inh_tok in im.group(1).split():
+                                    if inh_tok.strip():
+                                        inherited_target_names.add(inh_tok.strip())
                         except Exception:
                             pass
+        for x_txt in xml_texts_cache:
+            try:
+                _collect_xml_templates_from_source(x_txt, xml_template_children, inherited_target_names)
+            except Exception:
+                pass
+
+        _XML_TEMPLATE_EXPANSION_MEMO.clear()
+        t_phase = datetime.now()
 
         module_menu_bars = {}
         module_lua_btn_counts = {}
@@ -514,6 +567,7 @@ def build_esoui_index_once():
             return stem
 
         for file_path in all_source_files:
+            t_file_start = datetime.now()
             file = os.path.basename(file_path)
             rel_display = os.path.relpath(file_path, ESO_LIVE_SOURCE_DIR).replace("\\", "/")
             feat_key = _feature_stem(file)
@@ -566,6 +620,9 @@ def build_esoui_index_once():
                                 ESOUI_RAM_DICTIONARY[cand_ctrl] = f"ESOUI Virtual Control ({rel_display}:{ln_no})"
 
                 file_count += 1
+                dt_file = (datetime.now() - t_file_start).total_seconds()
+                if dt_file > 0.25:
+                    print(f"{C.YELLOW}       [DEBUG-RAM] Slow file ({dt_file:.2f}s): {rel_display}{C.RESET}", flush=True)
             except Exception:
                 pass
 
