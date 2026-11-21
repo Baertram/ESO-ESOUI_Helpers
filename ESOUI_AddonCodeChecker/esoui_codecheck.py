@@ -14,6 +14,7 @@ from datetime import datetime
 from src.esoui_config import (
     BASE_FOLDER,
     C,
+    CMD_HISTORY_FILE,
     DEBUG_MODE,
     ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX,
     ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX,
@@ -37,9 +38,6 @@ from src.esoui_ai_and_report import (
     process_latest_filelist_in_chunks,
     toggle_bp_multi_globals,
 )
-
-
-CMD_HISTORY_FILE = os.path.join("Cache", "cmd_history.json")
 
 
 def _load_cmd_history(history_path=CMD_HISTORY_FILE):

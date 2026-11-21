@@ -24,6 +24,7 @@ from ollama import Client
 from src.esoui_config import (
     AI_NUM_CTX,
     AI_TIMEOUT_SECONDS,
+    ALLOWED_DOC_EXTENSIONS,
     ALLOWED_DOC_STEMS,
     ALLOWED_EXTENSIONS,
     BLOCKED_EXECUTABLE_EXTENSIONS,
@@ -453,7 +454,7 @@ def _check_zip_structure(zip_path, report_data):
                 if is_dir:
                     continue
 
-                is_doc_or_license = (base_stem in ALLOWED_DOC_STEMS) or (entry_ext in {'.md', '.license', '.bbcode'})
+                is_doc_or_license = (base_stem in ALLOWED_DOC_STEMS) or (entry_ext in ALLOWED_DOC_EXTENSIONS)
                 if entry_ext == '.dds':
                     dds_textures.append(normalized)
                 elif entry_ext == '.font':

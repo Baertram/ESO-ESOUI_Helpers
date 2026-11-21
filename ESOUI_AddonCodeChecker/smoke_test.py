@@ -819,5 +819,33 @@ class TestEsouiModularSmoke(unittest.TestCase):
         )
 
 
+    def test_15_libstub_excluded_functions(self):
+        from src.esoui_lua_analyzer import find_uncommented_libstub_hits
+
+        lua_src = (
+            'local NAME = "LibCodesCommonCode"\n'
+            "local VERSION = 40\n"
+            "local Lib = { version = VERSION }\n"
+            "_G[NAME] = Lib\n"
+            "\n"
+            "function Lib.GetLibAddonMenu( )\n"
+            "    if (LibStub and not ZO_IsConsoleOrGameCoreUI()) then\n"
+            '        local version = select(2, LibStub("LibAddonMenu-2.0", true))\n'
+            "        if (version and version < 36) then\n"
+            "            return nil\n"
+            "        end\n"
+            "    end\n"
+            "    return LibAddonMenu2\n"
+            "end\n"
+            "\n"
+            "function Lib.OtherHelper()\n"
+            '    return LibStub("LibSomething")\n'
+            "end\n"
+        )
+        hits = find_uncommented_libstub_hits(lua_src)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][0], 17)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

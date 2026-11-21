@@ -18,8 +18,9 @@ ZIP_FOLDER = os.path.join(BASE_FOLDER, "Zips")
 EXTRACT_FOLDER = os.path.join(BASE_FOLDER, "Tmp")
 REPORTS_BASE_DIR = os.path.join(BASE_FOLDER, "_Reports")
 
-ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.slug', '.font', '.md', '.license', '.bbcode'}
-ALLOWED_DOC_STEMS = {'readme', 'license', 'licence', 'copying', 'copyright', 'changelog', 'changes'}
+ALLOWED_DOC_EXTENSIONS = {'.md', '.license', '.bbcode', '.log'}
+ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.slug', '.font'} | ALLOWED_DOC_EXTENSIONS
+ALLOWED_DOC_STEMS = {'readme', 'license', 'licence', 'copying', 'copyright', 'changelog', 'changes', 'change'}
 BLOCKED_EXECUTABLE_EXTENSIONS = {
     '.exe', '.bat', '.cmd', '.com', '.ps1', '.vbs', '.vbe', '.js', '.jse',
     '.wsf', '.wsh', '.py', '.pyw', '.sh', '.bash', '.zsh', '.msi', '.msp',
@@ -43,6 +44,17 @@ LUA_STD_LIBS = {
     "type", "tostring", "tonumber", "pcall", "xpcall", "error", "assert",
     "setmetatable", "getmetatable", "rawget", "rawset", "rawequal"
 }
+LUA_KEYWORDS = {
+    "local", "function", "if", "end", "then", "return", "else", "elseif",
+    "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
+    "not", "while", "repeat", "until", "break", "do", "self", "_"
+}
+NON_LANG_TWO_LETTER_STEMS = {"ui", "db", "sv", "io", "id", "os", "pc", "ps", "xb"}
+# Function names (e.g. 'GetLibAddonMenu' or 'LibCodesCommonCode.GetLibAddonMenu') where legacy LibStub checks are allowed
+LIBSTUB_EXCLUDED_FUNCTIONS = {
+    "GetLibAddonMenu",
+    "LibCodesCommonCode.GetLibAddonMenu",
+}
 
 # Local ESO reference sources used to build the fast RAM lookup dictionary
 ESO_LIVE_SOURCE_DIR = r"Q:\Tools\!Spiele\TESO\EsoUI\esoui_src\live\esoui"
@@ -63,6 +75,8 @@ ESO_ADDONS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Elder Scrol
 CACHE_DIR = "Cache"
 CACHE_ADDONS_DIR = os.path.join(CACHE_DIR, "AddOns")
 CACHE_ADDONS_EXTRACTED_DIR = os.path.join(CACHE_ADDONS_DIR, "_extracted")
+CMD_HISTORY_FILE = os.path.join(CACHE_DIR, "cmd_history.json")
+DEPENDENCY_CACHE_FILE = os.path.join(CACHE_DIR, "dependency_globals_cache.json")
 
 # Case-insensitive directory names inside an add-on that NEVER load on PC clients
 PC_IGNORED_SUBDIRS = frozenset({

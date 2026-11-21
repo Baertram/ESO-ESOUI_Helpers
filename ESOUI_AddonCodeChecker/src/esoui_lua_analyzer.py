@@ -37,6 +37,8 @@ from src.esoui_config import (
     ESO_BINDINGS_SCHEMA_FILE,
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
+    LIBSTUB_EXCLUDED_FUNCTIONS,
+    LUA_KEYWORDS,
     LUA_STD_LIBS,
     WIKI_EVENT_FILTERS_FILE,
     WIKI_LGB_IDS_TXT_FILE,
@@ -727,17 +729,75 @@ def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
 
 
 def find_uncommented_libstub_hits(content):
-    """Returns [(line_no, raw_line), ...] for active LibStub references in Lua code."""
-    code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
+    """Returns [(line_no, raw_line), ...] for active LibStub references outside LIBSTUB_EXCLUDED_FUNCTIONS."""
+    clean_with_strings = strip_lua_comments_preserve_lines(content)
+    code_only = strip_lua_strings_preserve_lines(clean_with_strings)
     raw_lines = content.splitlines()
+
+    excluded_exact = {fn.strip() for fn in LIBSTUB_EXCLUDED_FUNCTIONS if fn and fn.strip()}
+    excluded_lower = {fn.lower() for fn in excluded_exact}
+
+    # Resolve local namespace aliases (e.g. local NAME = "LibCodesCommonCode"; local Lib = {}; _G[NAME] = Lib)
+    local_str_consts = dict(re.findall(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["\']([^"\']+)["\']', clean_with_strings))
+    ns_aliases = {}
+    for m_g in re.finditer(r'_G\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=\s*([A-Za-z_][A-Za-z0-9_]*)', clean_with_strings):
+        ns_aliases[m_g.group(2)] = m_g.group(1)
+    for m_gv in re.finditer(r'_G\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*=\s*([A-Za-z_][A-Za-z0-9_]*)', clean_with_strings):
+        if m_gv.group(1) in local_str_consts:
+            ns_aliases[m_gv.group(2)] = local_str_consts[m_gv.group(1)]
+    for m_la in re.finditer(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)(?!\s*[.:\[(])\b', code_only):
+        lhs, rhs = m_la.group(1), m_la.group(2)
+        if rhs in ns_aliases:
+            ns_aliases[lhs] = ns_aliases[rhs]
+        elif rhs not in LUA_KEYWORDS:
+            ns_aliases.setdefault(lhs, rhs)
+
+    def _is_excluded_func(full_func_name):
+        if not excluded_lower:
+            return False
+        short_fn = full_func_name.split(".")[-1].split(":")[-1]
+        candidates = {full_func_name, short_fn}
+        if "." in full_func_name or ":" in full_func_name:
+            sep = ":" if ":" in full_func_name else "."
+            owner, member = full_func_name.split(sep, 1)
+            resolved_owner = ns_aliases.get(owner, owner)
+            candidates.add(f"{resolved_owner}.{member}")
+            candidates.add(f"{resolved_owner}:{member}")
+        return any(c in excluded_exact or c.lower() in excluded_lower for c in candidates)
+
     hits = []
     rx = re.compile(r'\blibstub\b', flags=re.IGNORECASE)
+    fn_def_rx = re.compile(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(')
+    token_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b|\b(end|until)\b')
+    block_stack = []
+
     for idx, line in enumerate(code_only.splitlines(), 1):
-        if rx.search(line):
+        fn_m = fn_def_rx.search(line)
+        fn_name_on_line = fn_m.group(1) if fn_m else None
+        norm_line = re.sub(r'\b(?:for|while)\b[^;\n]*?\bdo\b', 'for', line)
+
+        tokens = list(token_rx.finditer(norm_line))
+        # Check LibStub either inside an already-excluded function or on the excluded function header itself
+        in_excluded_fn = any(is_excl for _, is_excl in block_stack) or (
+            fn_name_on_line is not None and _is_excluded_func(fn_name_on_line)
+        )
+        if not in_excluded_fn and rx.search(line):
             orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
             hits.append((idx, orig))
-    return hits
 
+        first_fn_consumed = False
+        for tm in tokens:
+            b_open, b_close = tm.groups()
+            if b_open:
+                if b_open == "function" and not first_fn_consumed and fn_name_on_line is not None:
+                    first_fn_consumed = True
+                    block_stack.append(("function", _is_excluded_func(fn_name_on_line)))
+                else:
+                    block_stack.append((b_open, False))
+            elif b_close and block_stack:
+                block_stack.pop()
+
+    return hits
 
 def check_for_uncommented_libstub(content):
     return bool(find_uncommented_libstub_hits(content))
@@ -940,11 +1000,6 @@ def find_repeated_globals_in_lua(content, raw_lines, all_addon_globals, ram_dict
     """Detects globals referenced >= 2 times in a file without a local alias."""
     code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
     lines = code_only.splitlines()
-    lua_keywords = {
-        "local", "function", "if", "end", "then", "return", "else", "elseif",
-        "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
-        "not", "while", "repeat", "until", "break", "do", "self"
-    }
     file_locals = _collect_lua_local_identifiers(code_only)
     file_hits = defaultdict(list)
     ident_pat = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
@@ -955,7 +1010,7 @@ def find_repeated_globals_in_lua(content, raw_lines, all_addon_globals, ram_dict
             continue
         for match in ident_pat.finditer(line):
             word = match.group(1)
-            if len(word) < 3 or word in lua_keywords or word in file_locals:
+            if len(word) < 3 or word in LUA_KEYWORDS or word in file_locals:
                 continue
             start_pos, end_pos = match.span()
             prefix = line[:start_pos].rstrip()
@@ -1271,7 +1326,7 @@ def _check_lua_ai_slop_patterns(content, raw_lines):
     exists_hits = []
     pcall_pat = re.compile(r'(?<![A-Za-z0-9_.:])\bpcall\s*\(')
     if_exists_pat = re.compile(
-        r'\b(?:if|elseif)\s+(?:type\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*(?:==|~=)\s*""|([A-Za-z_][A-Za-z0-9_]*)\s*(?:~= nil)?)\s*then\b'
+        r'\b(?:if|elseif)\s+(?:type\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*(?:==|~=)\s*["\'](?:nil|function|table)["\']|([A-Za-z_][A-Za-z0-9_]*)\s*(?:~= nil)?)\s*then\b'
     )
 
     for idx, line in enumerate(lines, 1):
@@ -1384,12 +1439,6 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
         | LUA_STD_LIBS
     )
 
-    lua_keywords = {
-        "local", "function", "if", "end", "then", "return", "else", "elseif",
-        "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
-        "not", "while", "repeat", "until", "break", "do", "self", "_"
-    }
-
     scope_stack = []
     token_rx = re.compile(
         r'(\{)|(\})|\b(function|if|for|while|repeat|do)\b|\b(end|until)\b|(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)'
@@ -1418,7 +1467,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
             elif var_name and not is_local_stmt:
                 if scope_stack and scope_stack[-1] == "table":
                     continue
-                if var_name in lua_keywords or var_name in scoped_locals or var_name in allowed_globals:
+                if var_name in LUA_KEYWORDS or var_name in scoped_locals or var_name in allowed_globals:
                     continue
 
                 prefix = line[:m.start(5)].rstrip()
@@ -1760,12 +1809,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
 
     local_defs = _collect_lua_local_identifiers(clean_code_for_words)
     all_words = set(re.findall(r'(?<![.:])\b([A-Za-z_][A-Za-z0-9_]*)\b', clean_code_for_words))
-    lua_keywords = {
-        "local", "function", "if", "end", "then", "return", "else", "elseif",
-        "for", "in", "pairs", "ipairs", "true", "false", "nil", "and", "or",
-        "not", "while", "repeat", "until", "break"
-    }
-    words_to_check = all_words - lua_keywords - table_keys_to_ignore - local_defs
+    words_to_check = all_words - LUA_KEYWORDS - table_keys_to_ignore - local_defs
 
     parts_or_stem = file_name.replace("\\", "/").split("/") if ("\\" in file_name or "/" in file_name) else os.path.splitext(file_name)
     addon_main_namespace = next(iter(parts_or_stem))

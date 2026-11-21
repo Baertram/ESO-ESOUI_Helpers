@@ -10,6 +10,7 @@ from src.esoui_config import (
     ESO_BINDINGS_SCHEMA_FILE,
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
+    NON_LANG_TWO_LETTER_STEMS,
     resolve_config_file_path,
 )
 from src.esoui_config import CACHE_ADDONS_EXTRACTED_DIR, ESO_ADDONS_DIR
@@ -164,7 +165,6 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
 
     explicit_dds_lines = []
     lang_code_candidates = []
-    non_lang_two_letter_stems = {"ui", "db", "sv", "io", "id", "os", "pc", "ps", "xb"}
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
         if not stripped or stripped.startswith(("#", ";")):
@@ -175,7 +175,7 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
         norm_entry = stripped.replace("\\", "/")
         base_file = norm_entry.rsplit("/", 1)[-1]
         stem, f_ext = os.path.splitext(base_file)
-        if f_ext.lower() in (".lua", ".xml") and re.match(r"^[A-Za-z]{2}$", stem) and stem.lower() not in non_lang_two_letter_stems:
+        if f_ext.lower() in (".lua", ".xml") and re.match(r"^[A-Za-z]{2}$", stem) and stem.lower() not in NON_LANG_TWO_LETTER_STEMS:
             dir_part = norm_entry.rsplit("/", 1)[0].lower() if "/" in norm_entry else ""
             lang_code_candidates.append((dir_part, stripped))
 
