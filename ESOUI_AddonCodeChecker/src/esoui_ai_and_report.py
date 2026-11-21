@@ -870,6 +870,16 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
         elif section == "bp":
             if s.startswith("- "):
                 bp_header = s[2:].strip()
+                m_missing_ref = re.match(
+                    r"^Missing local reference to global addon table '([^']+)'\s*\(lines?\s+([0-9,\s]+)\)\s*$",
+                    bp_header,
+                )
+                if m_missing_ref:
+                    g_name = m_missing_ref.group(1).strip()
+                    lines_str = ", ".join(tok.strip() for tok in m_missing_ref.group(2).split(",") if tok.strip())
+                    report_data.setdefault("missing_local_addon_ref", defaultdict(list))[g_name].append((rel_norm, lines_str))
+                    report_data["_last_bp_rule"] = None
+                    continue
                 if "without a local reference" in bp_header:
                     bp_rule = "Possible action: Global variable used multiple times without a local reference"
                 elif "Startup Chat Spam" in bp_header:
@@ -1083,7 +1093,12 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     )
     has_unverified = bool(unverified_entries)
     include_multi_globals = is_bp_multi_globals_enabled()
-    has_bp = bool(report_data["best_practices"]) or (include_multi_globals and bool(report_data.get("bp_grouped_globals")))
+    missing_addon_refs = report_data.get("missing_local_addon_ref") or {}
+    has_bp = (
+        bool(report_data["best_practices"])
+        or bool(missing_addon_refs)
+        or (include_multi_globals and bool(report_data.get("bp_grouped_globals")))
+    )
 
     if has_crit:
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="Red"{rb}{lb}FONT="Impact"{rb}Critical violations{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
@@ -1225,6 +1240,24 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     if has_bp:
         out.append("")
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrange"{rb}{lb}FONT="Impact"{rb}Best practices{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+
+        if missing_addon_refs:
+            out.append("")
+            out.append(f"{lb}u{rb}Possible action: local reference to global missing?{lb}/u{rb}")
+            out.append("Consider adding a line local <globalName> = <globalName> at the top of your lua files")
+            spoiler_sections = []
+            for g_name in sorted(missing_addon_refs.keys(), key=lambda x: x.lower()):
+                sec_lines = [f"{lb}u{rb}{lb}b{rb}{g_name}{lb}/b{rb}{lb}/u{rb}"]
+                seen_locs = set()
+                for f_path, lines_val in sorted(missing_addon_refs[g_name], key=lambda item: str(next(iter(item))).lower()):
+                    short_fp = _strip_addon_root_prefix(f_path)
+                    loc_str = f"  {short_fp}: {lines_val}"
+                    if loc_str not in seen_locs:
+                        seen_locs.add(loc_str)
+                        sec_lines.append(loc_str)
+                spoiler_sections.append("\n".join(sec_lines))
+            spoiler_body = "\n\n".join(spoiler_sections)
+            out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
 
         outdated_dep_rule = "Possible action: Mandatory version check >= outdated - consider an update"
         outdated_entries = report_data["best_practices"].get(outdated_dep_rule)

@@ -651,6 +651,7 @@ def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
     if not isinstance(content, str) or not content:
         return ""
 
+    content = content.lstrip("\ufeff")
     out = []
     n = len(content)
     i = 0
@@ -751,6 +752,7 @@ def strip_lua_strings_preserve_lines(content):
 def collect_addon_context(extract_dir):
     """Collects Bindings.xml presence, XML content, global tables, SavedVariables, and manifests."""
     has_bindings_xml = False
+    is_library = False
     xml_combined_parts = []
     all_global_tables = set()
     dynamic_globals = set()
@@ -792,6 +794,8 @@ def collect_addon_context(extract_dir):
                             sub_text = sub_mf.read()
                         if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", sub_text, flags=re.MULTILINE | re.IGNORECASE):
                             bundled_sub_addons.add(os.path.splitext(f)[0].lower())
+                            if re.search(r"^\s*##\s*IsLibrary\s*:\s*true\b", sub_text, flags=re.MULTILINE | re.IGNORECASE):
+                                is_library = True
                             for m_line in sub_text.splitlines():
                                 sv_match = re.match(r"^\s*##\s*SavedVariables\s*:\s*(.+)$", m_line.strip(), flags=re.IGNORECASE)
                                 if sv_match:
@@ -822,19 +826,28 @@ def collect_addon_context(extract_dir):
                         lua_clean = strip_lua_comments_preserve_lines(raw_lua_txt)
                         lua_no_str = strip_lua_strings_preserve_lines(lua_clean)
                         lua_texts_for_dyn_g.append((rel_f_norm, lua_clean))
+                        file_locals = _collect_lua_local_identifiers(lua_no_str)
+                        line_scopes = _build_line_local_scopes(lua_no_str)
+                        block_open_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b')
+                        block_close_rx = re.compile(r'\b(end|until)\b')
                         brace_depth = 0
+                        block_depth = 0
                         for ln_no, code_ln in enumerate(lua_no_str.splitlines(), 1):
-                            if brace_depth == 0:
+                            if brace_depth == 0 and block_depth == 0:
                                 m_tbl = re.match(
-                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{)',
+                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|([A-Za-z_][A-Za-z0-9_]*)\s*$)',
                                     code_ln,
                                 )
                                 if m_tbl:
                                     m_name = m_tbl.group(1)
-                                    if not re.search(r'\blocal\s+' + re.escape(m_name) + r'\b', lua_no_str):
+                                    rhs_ident = m_tbl.group(2)
+                                    scoped_locals = line_scopes[ln_no - 1] if (ln_no - 1) < len(line_scopes) else set()
+                                    is_valid_rhs = (rhs_ident is None) or (rhs_ident in file_locals or rhs_ident in scoped_locals)
+                                    if is_valid_rhs and m_name not in file_locals and m_name not in scoped_locals and m_name not in ESOUI_GLOBAL_DEFINES:
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             brace_depth = max(0, brace_depth + code_ln.count("{") - code_ln.count("}"))
+                            block_depth = max(0, block_depth + len(block_open_rx.findall(code_ln)) - len(block_close_rx.findall(code_ln)))
                         for m_g in re.finditer(r'_G\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=', lua_clean):
                             g_name = m_g.group(1)
                             ln_no = lua_clean.count("\n", 0, m_g.start(1)) + 1
@@ -891,6 +904,7 @@ def collect_addon_context(extract_dir):
 
     return {
         "has_bindings_xml": has_bindings_xml,
+        "is_library": is_library,
         "xml_content": "\n".join(xml_combined_parts),
         "all_global_tables": all_global_tables,
         "dynamic_globals": dynamic_globals,
@@ -1535,7 +1549,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
     lua_suggestions = []
     has_bindings_xml = addon_ctx["has_bindings_xml"]
     combined_xml_content = addon_ctx["xml_content"]
-    all_addon_globals = set(addon_ctx["all_global_tables"]) | set(dep_globals_set or set())
+    all_addon_globals = set(dep_globals_set or set())
 
     if not is_index_built():
         build_esoui_index_once()
@@ -1568,18 +1582,26 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                     f"Keep '{g_func}()' local or attach it to your single addon table (-- {orig})"
                 )
 
-    raw_table_matches = re.findall(r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{)', comment_free_lua, flags=re.MULTILINE)
+    is_library_addon = bool(addon_ctx.get("is_library"))
+    lua_no_str_local = strip_lua_strings_preserve_lines(comment_free_lua)
+    declared_file_locals = _collect_lua_local_identifiers(lua_no_str_local)
+    raw_table_matches = re.findall(
+        r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_]*\s*$)',
+        lua_no_str_local,
+        flags=re.MULTILINE,
+    )
     global_table_matches = [
         m for m in dict.fromkeys(raw_table_matches)
-        if not re.search(r'\blocal\s+' + re.escape(m) + r'\b', comment_free_lua)
+        if m not in declared_file_locals and m not in ESOUI_GLOBAL_DEFINES
     ]
 
     aliased_globals_in_file = set()
+    polluted_globals_in_file = set()
     for g_table in global_table_matches:
         used_in_xml = bool(re.search(r'\b' + re.escape(g_table) + r'\b', combined_xml_content))
-        is_legitimate_global = (lua_file_count > 1) or has_bindings_xml or used_in_xml
+        is_legitimate_global = is_library_addon or (lua_file_count > 1) or has_bindings_xml or used_in_xml
 
-        alias_match = re.search(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*' + re.escape(g_table) + r'\b', comment_free_lua)
+        alias_match = re.search(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*' + re.escape(g_table) + r'(?!\s*[.:\[(])\b', lua_no_str_local)
         local_alias = alias_match.group(1) if alias_match else None
         if local_alias:
             aliased_globals_in_file.add(g_table)
@@ -1592,6 +1614,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                 direct_usage_lines.append((idx, orig_line))
 
         if not is_legitimate_global:
+            polluted_globals_in_file.add(g_table)
             lua_issues.append(
                 "Global Pollution: Created global table '" + g_table
                 + "' in a single-file addon w/o Bindings.xml, globals used in XML, and no API provided. Everything should be kept strictly 'local'!"
@@ -1603,6 +1626,31 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                 f"but '{g_table}' is still accessed directly {len(direct_usage_lines)} time(s) instead of using '{local_alias}':\n"
                 + "\n".join(formatted_hits)
             )
+
+    # Check all legitimate addon/library global tables for a missing local pointer in this file
+    candidate_addon_tables = sorted(
+        (set(addon_ctx.get("all_global_tables") or set()) | set(global_table_matches)) - polluted_globals_in_file
+    )
+    no_str_lines = lua_no_str_local.splitlines()
+    for g_table in candidate_addon_tables:
+        used_in_xml = bool(re.search(r'\b' + re.escape(g_table) + r'\b', combined_xml_content))
+        if not (is_library_addon or (lua_file_count > 1) or has_bindings_xml or used_in_xml):
+            continue
+        if re.search(r'\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*' + re.escape(g_table) + r'(?!\s*[.:\[(])\b', lua_no_str_local):
+            continue
+        def_rx = re.compile(r'^\s*(?!local\s)' + re.escape(g_table) + r'\s*=(?!=)')
+        ref_rx = re.compile(r'\b' + re.escape(g_table) + r'\b')
+        usage_lines = []
+        for idx, s_line in enumerate(no_str_lines, 1):
+            if def_rx.match(s_line):
+                occ = len(ref_rx.findall(s_line))
+                if occ > 1 and not re.match(r'^\s*' + re.escape(g_table) + r'\s*=\s*' + re.escape(g_table) + r'\s*or\s*\{', s_line):
+                    usage_lines.append(idx)
+            elif ref_rx.search(s_line):
+                usage_lines.append(idx)
+        if usage_lines:
+            lines_fmt = ", ".join(str(ln) for ln in usage_lines)
+            lua_suggestions.append(f"Missing local reference to global addon table '{g_table}' (lines {lines_fmt})")
 
     primary_rep, minor_rep = find_repeated_globals_in_lua(
         "\n".join(raw_lines), raw_lines, all_addon_globals, ESOUI_RAM_DICTIONARY, ESOUI_UNDOCUMENTED_SET, LUA_STD_LIBS

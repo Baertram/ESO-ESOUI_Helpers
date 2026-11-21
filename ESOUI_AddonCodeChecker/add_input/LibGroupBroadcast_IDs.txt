@@ -172,7 +172,7 @@ Simply pick the next free id, update your code accordingly and edit this wiki pa
 | no
 | Shares information in PvP
 | -
-| TBD
+| RdKGroupToolLegacyProtocol, RdKGroupToolAdminProtocol, RdKGroupToolVersionProtocol, RdKGroupToolHeartbeatProtocol, RdKGroupToolSynergyProtocol, RdKGroupToolHpDmgProtocol
 |-
 | [https://www.esoui.com/downloads/info3137-CrutchAlerts.html CrutchAlerts]
 | [https://www.esoui.com/downloads/author-42939.html Kyzeragon]
@@ -292,7 +292,7 @@ Simply pick the next free id, update your code accordingly and edit this wiki pa
 | no
 | Shares information in Group (PvE)
 | -
-| ArcanumArtisCallouts
+| ArcanumArtisCallouts, ArcanumArtisGroups
 |-
 | ResParse
 | thepandalore
@@ -647,7 +647,37 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Sends data for live Coordinates, Raid Warnings and Countdowns
 | Makos's ContentHelper
 |-
-| colspan="4" | ''102-111 reserved for RdKGroupTool''
+| 102
+| RdKGroupToolLegacyProtocol
+| Legacy protocol data
+| RdKGroupTool
+|-
+| 103
+| RdKGroupToolAdminProtocol
+| Admin protocol data
+| RdKGroupTool
+|-
+| 104
+| RdKGroupToolVersionProtocol
+| Version information
+| RdKGroupTool
+|-
+| 105
+| RdKGroupToolHeartbeatProtocol
+| Heartbeat protocol
+| RdKGroupTool
+|-
+| 106
+| RdKGroupToolSynergyProtocol
+| Synergy protocol data
+| RdKGroupTool
+|-
+| 107
+| RdKGroupToolHpDmgProtocol
+| Healing and Damage values (different from PvE as only damage and healing in regards of players and not npcs is counted)
+| RdKGroupTool
+|-
+| colspan="4" | ''108-111 reserved for RdKGroupTool''
 |-
 | colspan="4" | ''112-121 reserved for LibShareCombatEvents''
 |-
@@ -706,7 +736,7 @@ In order to keep ids somewhat organized, it was suggested that for now everyone 
 | Sends group assignment to group members.
 | Arcanum Artis GuildHall
 |-
-| colspan="4" | ''172 - 179 reserved for Arcanum Artis GuildHall''
+| colspan="4" | ''172 - 174 reserved for Arcanum Artis GuildHall''
 |-
 | colspan="4" | ''180 - 189 reserved for Rytic Combat & Raid Tools''
 |-

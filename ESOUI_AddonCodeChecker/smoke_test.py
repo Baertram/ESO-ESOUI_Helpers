@@ -229,10 +229,12 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 report_data["zip_manifest_paths"],
             )
 
+            from src import esoui_ai_and_report
             with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
                 tmp_path = tf.name
             try:
-                _render_final_bbcode_report(tmp_path, "MyAddon.zip", "2026-11-15 02:35:00 AM", report_data)
+                with patch.object(esoui_ai_and_report, "SHOW_BP_MULTI_GLOBALS", True):
+                    _render_final_bbcode_report(tmp_path, "MyAddon.zip", "2026-11-15 02:35:00 AM", report_data)
                 with open(tmp_path, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
                 self.assertIn("MyAddon.addon [MANIFEST]", rendered)
@@ -518,6 +520,136 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 self.assertEqual(len(dl_calls), 1)
                 self.assertIn("FRESH_CACHED_PC_GLOBAL", g2)
 
+
+    def test_10_comma_locals_and_function_param_tables_not_global(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "Teleport")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "Teleport.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: Teleport\n## APIVersion: 101051\nTeleport.lua\nNodes.lua\n")
+
+            file1_src = "Teleport = Teleport or {}\nfunction Teleport.Load(id, options)\n    options = options or {}\nend\n"
+            file2_src = (
+                "local dungeons, sortedDungeons, wayshrines, houseNodeIndices, wayshrinesByZoneIndexPoiIndex\n"
+                "function Teleport.Init()\n"
+                "    wayshrines = {}\n"
+                "    houseNodeIndices = {}\n"
+                "    wayshrinesByZoneIndexPoiIndex = {}\n"
+                "end\n"
+            )
+            with open(os.path.join(addon_dir, "Teleport.lua"), "w", encoding="utf-8") as f1:
+                f1.write(file1_src)
+            with open(os.path.join(addon_dir, "Nodes.lua"), "w", encoding="utf-8") as f2:
+                f2.write(file2_src)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertEqual(ctx.get("all_global_tables"), {"Teleport"})
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res1 = analyze_lua_file("Teleport/Teleport.lua", file1_src, tmp_dir, ctx)
+                res2 = analyze_lua_file("Teleport/Nodes.lua", file2_src, tmp_dir, ctx)
+
+            self.assertNotIn("Multiple Global Addon Tables", res1)
+            self.assertNotIn("Multiple Global Addon Tables", res2)
+
+
+    def test_11_missing_local_reference_to_addon_or_lib_global(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _parse_findings_into_report_data, _render_final_bbcode_report
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            lib_dir = os.path.join(tmp_dir, "LibDeconValue")
+            os.makedirs(lib_dir, exist_ok=True)
+            with open(os.path.join(lib_dir, "LibDeconValue.txt"), "w", encoding="utf-8") as mf:
+                mf.write(
+                    "## Title: LibDeconValue\n## IsLibrary: TrUe\n## APIVersion: 101051\n"
+                    "LibDeconValue.lua\nLibDeconValue_Main.lua\nLibDeconValue_Stats.lua\n"
+                )
+
+            lib_lua = (
+                "local lib = {}\n"
+                "LibDeconValue = lib\n"
+                "function LibDeconValue.GetValue(itemLink)\n"
+                "    return 42\n"
+                "end\n"
+            )
+            lib_main = (
+                "\ufeffLibDeconValue = LibDeconValue or { }\n"
+                "local data = LibDeconValue.Data\n"
+                "function LibDeconValue:GetDeconValue(itemLink)\n"
+                "    return LibDeconValue.GetValue(itemLink)\n"
+                "end\n"
+            )
+            lib_stats = (
+                "LibDeconValue = LibDeconValue or {}\n"
+                "local LDV = LibDeconValue\n"
+                "function LDV.GetStats()\n"
+                "    return 1\n"
+                "end\n"
+            )
+            with open(os.path.join(lib_dir, "LibDeconValue.lua"), "w", encoding="utf-8") as lf:
+                lf.write(lib_lua)
+            with open(os.path.join(lib_dir, "LibDeconValue_Main.lua"), "w", encoding="utf-8") as lf2:
+                lf2.write(lib_main)
+            with open(os.path.join(lib_dir, "LibDeconValue_Stats.lua"), "w", encoding="utf-8") as lf3:
+                lf3.write(lib_stats)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertTrue(ctx.get("is_library"))
+            self.assertIn("LibDeconValue", ctx.get("all_global_tables"))
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_lib = analyze_lua_file("LibDeconValue/LibDeconValue.lua", lib_lua, tmp_dir, ctx)
+                res_main = analyze_lua_file("LibDeconValue/LibDeconValue_Main.lua", lib_main, tmp_dir, ctx)
+                res_stats = analyze_lua_file("LibDeconValue/LibDeconValue_Stats.lua", lib_stats, tmp_dir, ctx)
+
+            self.assertIn("Missing local reference to global addon table 'LibDeconValue' (lines 3)", res_lib)
+            self.assertIn("Missing local reference to global addon table 'LibDeconValue' (lines 2, 3, 4)", res_main)
+            self.assertNotIn("Missing local reference", res_stats)
+            self.assertNotIn("Global Pollution", res_lib)
+
+            report_data = {
+                "zip_all_entries": [
+                    "LibDeconValue/",
+                    "LibDeconValue/LibDeconValue.txt",
+                    "LibDeconValue/LibDeconValue.lua",
+                    "LibDeconValue/LibDeconValue_Main.lua",
+                    "LibDeconValue/LibDeconValue_Stats.lua",
+                ],
+                "zip_flagged_paths": set(),
+                "zip_manifest_paths": {"LibDeconValue/LibDeconValue.txt"},
+                "zip_tree_bbcode": "",
+                "zip_violations": [],
+                "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+                "best_practices": defaultdict(list),
+            }
+            _parse_findings_into_report_data("LibDeconValue/LibDeconValue.lua", "lua", res_lib, report_data)
+            _parse_findings_into_report_data("LibDeconValue/LibDeconValue_Main.lua", "lua", res_main, report_data)
+            _parse_findings_into_report_data("LibDeconValue/LibDeconValue_Stats.lua", "lua", res_stats, report_data)
+
+            with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+                tmp_rep = tf.name
+            try:
+                _render_final_bbcode_report(tmp_rep, "LibDeconValue.zip", "2026-11-21 05:30:00 PM", report_data)
+                with open(tmp_rep, "r", encoding="utf-8") as rf:
+                    rendered = rf.read()
+                self.assertIn("[u]Possible action: local reference to global missing?[/u]", rendered)
+                self.assertIn("Consider adding a line local <globalName> = <globalName> at the top of your lua files", rendered)
+                self.assertIn("[u][b]LibDeconValue[/b][/u]", rendered)
+                self.assertIn("  \\LibDeconValue.lua: 3", rendered)
+                self.assertIn("  \\LibDeconValue_Main.lua: 2, 3, 4", rendered)
+                self.assertNotIn("  \\LibDeconValue_Stats.lua", rendered)
+            finally:
+                if os.path.exists(tmp_rep):
+                    os.remove(tmp_rep)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
