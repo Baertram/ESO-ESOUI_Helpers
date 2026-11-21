@@ -2,6 +2,11 @@
 -- Total Files Actually Scanned: 2424 (*.lua 1501 / *.xml 908 / *.txt 15)
 -- Total Undocumented Global Variables Found: 1027
 
+--0. Globals that were read manually from _G
+ACTION_RESULT_EFFECT_FADED = nil
+ACTION_RESULT_EFFECT_GAINED = nil
+ACTION_RESULT_EFFECT_GAINED_DURATION = nil
+
 -- 1. Global Constants (with ITERATION_ / _MIN_VALUE / _MAX_VALUE) --
 ACCOUNT_LABEL_MAX_VALUE = nil --/esoui/Libraries/Utility/ZO_PlatformUtils.lua:31:41 | internalassert(UI_PLATFORM_MAX_VALUE == [[ ACCOUNT_LABEL_MAX_VALUE ]], "There should be a platform account label for every platform")
 ADVENTURE_ZONE_BOSS_ITERATION_BEGIN = nil --/esoui/Ingame/AdventureZone/Gamepad/AdventureZoneBossTree_Gamepad.lua:24:16 | for boss = [[ ADVENTURE_ZONE_BOSS_ITERATION_BEGIN ]], ADVENTURE_ZONE_BOSS_ITERATION_END do

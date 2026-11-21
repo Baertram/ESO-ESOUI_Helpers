@@ -899,6 +899,54 @@ class TestEsouiModularSmoke(unittest.TestCase):
             if os.path.exists(tmp_rep):
                 os.remove(tmp_rep)
 
+    def test_17_single_file_addon_strict_local_pollution_message(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _parse_findings_into_report_data, _render_final_bbcode_report
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "RaffleGold")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "RaffleGold.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: RaffleGold\n## APIVersion: 101051\nRaffleGold.lua\n")
+            lua_src = "RaffleGold = {\n    name = 'RaffleGold',\n}\n"
+            with open(os.path.join(addon_dir, "RaffleGold.lua"), "w", encoding="utf-8") as lf:
+                lf.write(lua_src)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertEqual(ctx.get("lua_file_count"), 1)
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_lua = analyze_lua_file("RaffleGold/RaffleGold.lua", lua_src, tmp_dir, ctx)
+
+            self.assertNotIn("Global Pollution: Created global table", res_lua)
+
+            report_data = {
+                "is_strict_local_addon": True,
+                "zip_all_entries": ["RaffleGold/", "RaffleGold/RaffleGold.txt", "RaffleGold/RaffleGold.lua"],
+                "zip_flagged_paths": set(),
+                "zip_manifest_paths": {"RaffleGold/RaffleGold.txt"},
+                "zip_tree_bbcode": "",
+                "zip_violations": [],
+                "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+                "best_practices": defaultdict(list),
+            }
+            _parse_findings_into_report_data("RaffleGold/RaffleGold.lua", "lua", res_lua, report_data)
+
+            with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+                tmp_rep = tf.name
+            try:
+                _render_final_bbcode_report(tmp_rep, "RaffleGold.zip", "2026-11-22 12:25:00 AM", report_data)
+                with open(tmp_rep, "r", encoding="utf-8") as rf:
+                    rendered = rf.read()
+                self.assertIn("Missing local definition? In a single-file addon without XML/Bindings, everything should be kept strictly 'local'!", rendered)
+                self.assertNotIn("Else: Please define only 1 global table", rendered)
+            finally:
+                if os.path.exists(tmp_rep):
+                    os.remove(tmp_rep)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

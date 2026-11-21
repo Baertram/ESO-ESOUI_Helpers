@@ -1194,7 +1194,10 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
             if has_cat_pollution:
                 out.append(f"{lb}u{rb}{lb}b{rb}Global Variable Pollution{lb}/b{rb}{lb}/u{rb}")
-                out.append("Missing local definition? Else: Please define only 1 global table for your addon, and add all relevant functions/tables/controls/variables to it")
+                if report_data.get("is_strict_local_addon"):
+                    out.append("Missing local definition? In a single-file addon without XML/Bindings, everything should be kept strictly 'local'!")
+                else:
+                    out.append("Missing local definition? Else: Please define only 1 global table for your addon, and add all relevant functions/tables/controls/variables to it")
                 by_file = defaultdict(list)
                 for f_path, ln_no, var_name, code_txt in pollution_entries:
                     by_file[_strip_addon_root_prefix(f_path)].append((int(ln_no), var_name, code_txt))
@@ -1587,6 +1590,12 @@ def process_addon(zip_path, zip_name):
         if not is_index_built():
             build_esoui_index_once()
         addon_ctx = collect_addon_context(current_extract_dir)
+        report_data["is_strict_local_addon"] = (
+            int(addon_ctx.get("lua_file_count") or 0) <= 1
+            and not bool(addon_ctx.get("has_bindings_xml"))
+            and not bool(addon_ctx.get("is_library"))
+            and not bool(str(addon_ctx.get("xml_content") or "").strip())
+        )
         id_m = re.search(r'(?:^|[_-])(\d{2,6})(?:[_.-]|$)', zip_clean_name)
         if id_m:
             addon_ctx["current_addon_id"] = id_m.group(1)

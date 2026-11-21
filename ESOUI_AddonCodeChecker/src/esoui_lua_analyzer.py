@@ -844,6 +844,7 @@ def collect_addon_context(extract_dir):
         bundled_sub_addons = set()
         global_tables_by_file = defaultdict(set)
         lua_texts_for_dyn_g = []
+        lua_file_total = 0
         for root, _, files in os.walk(extract_dir):
             for f in files:
                 lower_f = f.lower()
@@ -879,6 +880,7 @@ def collect_addon_context(extract_dir):
                     except Exception:
                         pass
                 elif lower_f.endswith(".lua"):
+                    lua_file_total += 1
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as lf:
                             raw_lua_txt = lf.read()
@@ -966,6 +968,7 @@ def collect_addon_context(extract_dir):
     return {
         "has_bindings_xml": has_bindings_xml,
         "is_library": is_library,
+        "lua_file_count": lua_file_total if extract_dir and os.path.exists(extract_dir) else 0,
         "xml_content": "\n".join(xml_combined_parts),
         "all_global_tables": all_global_tables,
         "dynamic_globals": dynamic_globals,
@@ -1666,10 +1669,18 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
 
         if not is_legitimate_global:
             polluted_globals_in_file.add(g_table)
-            lua_issues.append(
-                "Global Pollution: Created global table '" + g_table
-                + "' in a single-file addon w/o Bindings.xml, globals used in XML, and no API provided. Everything should be kept strictly 'local'!"
-            )
+            if not any(f"(missing 'local' for '{g_table}')" in iss for iss in lua_issues):
+                def_ln = 1
+                orig_def = ""
+                tbl_def_rx = re.compile(r'^\s*(?!local\s)' + re.escape(g_table) + r'\s*=')
+                for idx_d, c_ln in enumerate(clean_lines_list, 1):
+                    if tbl_def_rx.match(c_ln):
+                        def_ln = idx_d
+                        orig_def = raw_lines[idx_d - 1].strip() if (idx_d - 1) < len(raw_lines) else ""
+                        break
+                lua_issues.append(
+                    f"Global Variable Pollution (missing 'local' for '{g_table}') (line {def_ln}): (-- {orig_def})"
+                )
         elif local_alias and direct_usage_lines:
             formatted_hits = [f"    {g_table}:{line_no} --{orig_line}" for line_no, orig_line in direct_usage_lines]
             lua_suggestions.append(
