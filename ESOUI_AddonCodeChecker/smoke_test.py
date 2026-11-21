@@ -770,11 +770,29 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 with open(out_txt, "r", encoding="utf-8") as rf:
                     return rf.read()
 
-        # 1. Valid single matching folder
-        ok_rep = _run_zip_case("MyAddon.zip", {"MyAddon/MyAddon.txt": "## Title: MyAddon\n", "MyAddon/Core.lua": "local x = 1\n"})
-        self.assertIn("[b]ANALYSIS FOR[/b]: MyAddon.zip", ok_rep)
+        # 1. Valid single matching folder (including bundled sub-addon with matching subfolder)
+        ok_rep = _run_zip_case(
+            "CollectiblesTracker.zip",
+            {
+                "CollectiblesTracker/CollectiblesTracker.addon": "## Title: CollectiblesTracker\n",
+                "CollectiblesTracker/Core.lua": "local x = 1\n",
+                "CollectiblesTracker/LibExtendedJournal/LibExtendedJournal.addon": "## Title: LibExtendedJournal\n",
+            },
+        )
+        self.assertIn("[b]ANALYSIS FOR[/b]: CollectiblesTracker.zip", ok_rep)
         self.assertNotIn("Wrong addon zip", ok_rep)
         self.assertNotIn("Check addon zip", ok_rep)
+
+        # 1b. Bundled sub-addon in mismatched subfolder name
+        sub_mismatch_rep = _run_zip_case(
+            "CollectiblesTracker.zip",
+            {
+                "CollectiblesTracker/CollectiblesTracker.addon": "## Title: CollectiblesTracker\n",
+                "CollectiblesTracker/Libs/LibExtendedJournal.addon": "## Title: LibExtendedJournal\n",
+            },
+        )
+        self.assertIn('[b]ANALYSIS FOR[/b]: [color="Red"]:mad: CollectiblesTracker.zip[/color]', sub_mismatch_rep)
+        self.assertIn('[color="red"][b][u]Wrong addon zip[/u][/b][/color]', sub_mismatch_rep)
 
         # 2. No folder in ZIP (loose manifest in root)
         no_dir_rep = _run_zip_case("CompanionDashboard.zip", {"CompanionDashboard.txt": "## Title: CompanionDashboard\n"})

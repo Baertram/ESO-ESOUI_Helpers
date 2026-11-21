@@ -50,14 +50,13 @@ def _check_manifest_line_lengths(content, manifest_issues):
 
 def _check_manifest_folder_match(file_name, manifest_issues):
     parts = file_name.replace("\\", "/").split("/")
-    if len(parts) == 2:
+    if len(parts) >= 2:
         parent_folder = parts[-2]
         manifest_base, _ = os.path.splitext(parts[-1])
         if parent_folder != manifest_base:
             manifest_issues.append(
                 f"Manifest Filename Mismatch: Manifest '{parts[-1]}' does not match its parent folder name '{parent_folder}' (case-sensitive!)."
             )
-
 
 def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions, addon_ctx=None):
     bundled_subs = set((addon_ctx or {}).get("bundled_sub_addons") or ())

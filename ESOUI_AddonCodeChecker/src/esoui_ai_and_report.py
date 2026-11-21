@@ -536,7 +536,7 @@ def _check_zip_structure(zip_path, report_data):
                 for m_path in sorted(manifest_paths):
                     m_parts = m_path.replace("\\", "/").split("/")
                     m_stem, _ = os.path.splitext(m_parts[-1])
-                    if len(m_parts) != 2 or m_parts[0] != m_stem or m_stem not in top_level_dirs:
+                    if len(m_parts) < 2 or m_parts[-2] != m_stem:
                         has_wrong_addon_zip = True
                         break
             else:
