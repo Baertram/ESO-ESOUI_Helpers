@@ -748,5 +748,58 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 os.remove(tmp_rep)
 
 
+    def test_14_zip_folder_structure_and_analysis_for_warning(self):
+        import zipfile
+        from src.esoui_ai_and_report import _check_zip_structure, _render_final_bbcode_report
+
+        def _run_zip_case(zip_filename, files_dict):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                zp = os.path.join(tmp_dir, zip_filename)
+                with zipfile.ZipFile(zp, "w") as zf:
+                    for rel_n, body in files_dict.items():
+                        zf.writestr(rel_n, body)
+                rep = {
+                    "zip_tree_bbcode": "",
+                    "zip_violations": [],
+                    "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+                    "best_practices": defaultdict(list),
+                }
+                _check_zip_structure(zp, rep)
+                out_txt = os.path.join(tmp_dir, "report.txt")
+                _render_final_bbcode_report(out_txt, zip_filename, "2026-11-21 09:05:00 PM", rep)
+                with open(out_txt, "r", encoding="utf-8") as rf:
+                    return rf.read()
+
+        # 1. Valid single matching folder
+        ok_rep = _run_zip_case("MyAddon.zip", {"MyAddon/MyAddon.txt": "## Title: MyAddon\n", "MyAddon/Core.lua": "local x = 1\n"})
+        self.assertIn("[b]ANALYSIS FOR[/b]: MyAddon.zip", ok_rep)
+        self.assertNotIn("Wrong addon zip", ok_rep)
+        self.assertNotIn("Check addon zip", ok_rep)
+
+        # 2. No folder in ZIP (loose manifest in root)
+        no_dir_rep = _run_zip_case("CompanionDashboard.zip", {"CompanionDashboard.txt": "## Title: CompanionDashboard\n"})
+        self.assertIn('[b]ANALYSIS FOR[/b]: [color="Red"]:mad: CompanionDashboard.zip[/color]', no_dir_rep)
+        self.assertIn('[color="red"][b][u]Wrong addon zip[/u][/b][/color]\nFoldername must match manifest (case-sensitive)', no_dir_rep)
+
+        # 3. Case mismatch folder name
+        case_rep = _run_zip_case("CompanionDashboard.zip", {"companiondashboard/CompanionDashboard.txt": "## Title: CompanionDashboard\n"})
+        self.assertIn('[b]ANALYSIS FOR[/b]: [color="Red"]:mad: CompanionDashboard.zip[/color]', case_rep)
+        self.assertIn('[color="red"][b][u]Wrong addon zip[/u][/b][/color]', case_rep)
+
+        # 4. Multiple top-level folders
+        multi_rep = _run_zip_case(
+            "CompanionDashboard.zip",
+            {
+                "CompanionDashboard/CompanionDashboard.txt": "## Title: CompanionDashboard\n",
+                "OtherAddon/OtherAddon.txt": "## Title: OtherAddon\n",
+            },
+        )
+        self.assertIn('[b]ANALYSIS FOR[/b]: [color="Red"]:mad: CompanionDashboard.zip[/color]', multi_rep)
+        self.assertIn(
+            '[color="red"][b][u]Check addon zip[/u][/b][/color]\nContains multiple folders: DO NOT OVERWRITE OTHER ADDONS FROM WITHIN YOUR ADDON!',
+            multi_rep,
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
