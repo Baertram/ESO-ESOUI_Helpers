@@ -888,6 +888,15 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 )
                 continue
 
+            if item_text.startswith("Global Function Pollution (leaked into _G)"):
+                ln_m = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
+                ln_val = int(ln_m.group(1)) if ln_m else 0
+                c_m = re.search(r'\((--\s*.*)\)\s*\.?$', item_text)
+                raw_c = c_m.group(1).strip() if c_m else ""
+                code_snip = re.sub(r'^--\s*', '', raw_c)
+                report_data.setdefault("global_func_pollution", []).append((rel_norm, ln_val, code_snip))
+                continue
+
             if item_text.startswith("Multiple Global Addon Tables:"):
                 m_multi = re.search(r'\(([^()]+)\)\s*$', item_text)
                 tbl_detail = m_multi.group(1).strip() if m_multi else ""
@@ -896,12 +905,12 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
 
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
-            code_match = re.search(r'\(((?:--|\#\#)[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', item_text)
+            rule_title = re.sub(r'\s*\((?:at\s+)?line\s+\d+\)|\s+at\s+line\s+\d+', '', item_text, flags=re.IGNORECASE)
+            code_match = re.search(r'\(((?:--|\#\#).*)\)\s*\.?$', rule_title)
             raw_code = code_match.group(1).strip() if code_match else ""
             code_comment = re.sub(r'^--\s*', '', raw_code)
-            rule_title = re.sub(r'\s*\((?:at\s+)?line\s+\d+\)|\s+at\s+line\s+\d+', '', item_text, flags=re.IGNORECASE)
             if code_match:
-                rule_title = rule_title[:rule_title.rfind("(")].strip().rstrip(":")
+                rule_title = rule_title[:code_match.start()].strip().rstrip(":")
             else:
                 rule_title = next(iter(rule_title.split(":", 1))).strip()
             report_data["critical"][category][rule_title].append((rel_norm, line_no, code_comment))
@@ -1135,12 +1144,14 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
 
     unverified_entries = report_data.get("unverified_globals") or []
     pollution_entries = report_data.get("global_var_pollution") or []
+    func_pollution_entries = report_data.get("global_func_pollution") or []
     lgb_entries = report_data.get("lgb_conflicts") or []
     zip_mf_folder_errors = report_data.get("zip_manifest_folder_errors") or []
     has_crit = (
         bool(report_data["zip_violations"])
         or bool(zip_mf_folder_errors)
         or bool(pollution_entries)
+        or bool(func_pollution_entries)
         or bool(lgb_entries)
         or any(bool(v) for v in report_data["critical"].values())
     )
@@ -1168,9 +1179,10 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         for cat_key, cat_label in (("manifest", "Manifest (.addon / .txt)"), ("lua", "Lua Files"), ("xml", "XML Files")):
             rules_map = report_data["critical"].get(cat_key) or {}
             has_cat_pollution = (cat_key == "lua" and bool(pollution_entries))
+            has_cat_func_pollution = (cat_key == "lua" and bool(func_pollution_entries))
             has_cat_lgb = (cat_key == "manifest" and bool(lgb_entries))
             has_cat_zip_mf = (cat_key == "manifest" and bool(zip_mf_folder_errors))
-            if not rules_map and not has_cat_pollution and not has_cat_lgb and not has_cat_zip_mf:
+            if not rules_map and not has_cat_pollution and not has_cat_func_pollution and not has_cat_lgb and not has_cat_zip_mf:
                 continue
             out.append("")
             out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
@@ -1193,6 +1205,22 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         spoiler_lines.append(f"  {ln_no}: {var_name} ({code_txt})")
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
+
+            if has_cat_func_pollution:
+                out.append(f"{lb}u{rb}Global Function Pollution (leaked into _G): Keep local or attach to your single addon table{lb}/u{rb}")
+                out.append(f"{lb}list{rb}")
+                by_file_fn = defaultdict(list)
+                for f_path, ln_no, code_txt in func_pollution_entries:
+                    by_file_fn[_strip_addon_root_prefix(f_path)].append((int(ln_no), code_txt))
+                for f_path in sorted(by_file_fn.keys(), key=lambda x: x.lower()):
+                    fn_lines = []
+                    for ln_no, code_txt in sorted(by_file_fn[f_path], key=lambda item: item[0]):
+                        prefix = f"{ln_no}: " if ln_no else ""
+                        fn_lines.append(f"{prefix}{code_txt}".strip())
+                    spoiler_body = "\n".join(fn_lines)
+                    spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}' if spoiler_body else ""
+                    out.append(f"{lb}*{rb} {f_path}{spoiler_part}")
+                out.append(f"{lb}/list{rb}")
 
             for rule_title, entries in rules_map.items():
                 out.append(f"{lb}u{rb}{rule_title}{lb}/u{rb}")
@@ -1653,6 +1681,8 @@ def process_addon(zip_path, zip_name):
 
     all_flagged = set(report_data.get("zip_flagged_paths", set()))
     for f_path, _, _, _ in report_data.get("global_var_pollution") or []:
+        all_flagged.add(f_path)
+    for f_path, _, _ in report_data.get("global_func_pollution") or []:
         all_flagged.add(f_path)
     for f_path, _, _ in report_data.get("lgb_conflicts") or []:
         all_flagged.add(f_path)

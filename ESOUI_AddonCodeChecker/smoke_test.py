@@ -847,5 +847,58 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertEqual(hits[0][0], 17)
 
 
+    def test_16_grouped_global_function_pollution_report(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _parse_findings_into_report_data, _render_final_bbcode_report
+        from src.esoui_lua_analyzer import analyze_lua_file
+
+        lua_src = (
+            "function RedLedger_Keybind_Test()\n"
+            "    return true\n"
+            "end\n"
+            "function RedLedger_WhatEver()\n"
+            "    return false\n"
+            "end\n"
+        )
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": {"RedLedger"},
+            "dynamic_globals": set(),
+            "saved_variables": set(),
+            "root_addon_manifests": ["RedLedger.txt"],
+            "root_txt_manifests": [],
+        }
+
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+        ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+            res_lua = analyze_lua_file("RedLedger/RedLedger.lua", lua_src, ".", ctx)
+
+        report_data = {
+            "zip_all_entries": ["RedLedger/", "RedLedger/RedLedger.txt", "RedLedger/RedLedger.lua"],
+            "zip_flagged_paths": set(),
+            "zip_manifest_paths": {"RedLedger/RedLedger.txt"},
+            "zip_tree_bbcode": "",
+            "zip_violations": [],
+            "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+            "best_practices": defaultdict(list),
+        }
+        _parse_findings_into_report_data("RedLedger/RedLedger.lua", "lua", res_lua, report_data)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+            tmp_rep = tf.name
+        try:
+            _render_final_bbcode_report(tmp_rep, "RedLedger.zip", "2026-11-22 12:00:00 AM", report_data)
+            with open(tmp_rep, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+            self.assertIn("[u]Global Function Pollution (leaked into _G): Keep local or attach to your single addon table[/u]", rendered)
+            self.assertIn('[*] \\RedLedger.lua [spoiler][SIZE="2"]1: function RedLedger_Keybind_Test()\n4: function RedLedger_WhatEver()[/SIZE][/spoiler]', rendered)
+            self.assertNotIn("(-- functio", rendered)
+        finally:
+            if os.path.exists(tmp_rep):
+                os.remove(tmp_rep)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
