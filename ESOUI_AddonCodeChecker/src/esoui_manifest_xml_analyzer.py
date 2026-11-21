@@ -164,10 +164,39 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
         print(f"    ├── Detected ## APIVersion: {detected_api_line} {C.CYAN}(Current Live API: {current_api or 'Unknown'}){C.RESET}")
 
     explicit_dds_lines = []
+    lang_code_candidates = []
+    non_lang_two_letter_stems = {"ui", "db", "sv", "io", "id", "os", "pc", "ps", "xb"}
     for raw_line in content.splitlines():
         stripped = raw_line.strip()
-        if stripped and not stripped.startswith(("#", ";")) and stripped.lower().endswith(".dds"):
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.lower().endswith(".dds"):
             explicit_dds_lines.append(stripped)
+            continue
+        norm_entry = stripped.replace("\\", "/")
+        base_file = norm_entry.rsplit("/", 1)[-1]
+        stem, f_ext = os.path.splitext(base_file)
+        if f_ext.lower() in (".lua", ".xml") and re.match(r"^[A-Za-z]{2}$", stem) and stem.lower() not in non_lang_two_letter_stems:
+            dir_part = norm_entry.rsplit("/", 1)[0].lower() if "/" in norm_entry else ""
+            lang_code_candidates.append((dir_part, stripped))
+
+    # Flag if > 1 fixed 2-letter language file is hardcoded in the same directory (or across translation folders)
+    by_lang_dir = {}
+    for d_part, orig_entry in lang_code_candidates:
+        by_lang_dir.setdefault(d_part, []).append(orig_entry)
+
+    hardcoded_lang_lines = []
+    for d_part, entries_in_dir in by_lang_dir.items():
+        if len(entries_in_dir) > 1:
+            hardcoded_lang_lines.extend(entries_in_dir)
+
+    if hardcoded_lang_lines:
+        print(f"    ├── {C.YELLOW}[Best Practice] Hardcoded language files detected ({len(hardcoded_lang_lines)}) - Use dynamic $(language):{C.RESET}")
+        for lang_entry in hardcoded_lang_lines:
+            print(f"    │     {C.YELLOW}- {lang_entry}{C.RESET}")
+        manifest_suggestions.append(
+            "Hardcoded language files - Use dynamic $(language): " + ", ".join(hardcoded_lang_lines)
+        )
 
     if explicit_dds_lines:
         print(f"    ├── {C.ORANGE}[Not needed] Texture files loaded explicitly in manifest's lines ({len(explicit_dds_lines)}):{C.RESET}")

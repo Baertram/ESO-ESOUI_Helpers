@@ -870,6 +870,14 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
         elif section == "bp":
             if s.startswith("- "):
                 bp_header = s[2:].strip()
+                if bp_header.startswith("Hardcoded language files - Use dynamic $(language):"):
+                    raw_files = bp_header.split(":", 1)[1].strip()
+                    for lf_item in raw_files.split(","):
+                        clean_lf = lf_item.strip()
+                        if clean_lf and clean_lf not in report_data.setdefault("hardcoded_lang_files", []):
+                            report_data["hardcoded_lang_files"].append(clean_lf)
+                    report_data["_last_bp_rule"] = None
+                    continue
                 m_missing_ref = re.match(
                     r"^Missing local reference to global addon table '([^']+)'\s*\(lines?\s+([0-9,\s]+)\)\s*$",
                     bp_header,
@@ -1094,9 +1102,11 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     has_unverified = bool(unverified_entries)
     include_multi_globals = is_bp_multi_globals_enabled()
     missing_addon_refs = report_data.get("missing_local_addon_ref") or {}
+    hardcoded_lang_files = report_data.get("hardcoded_lang_files") or []
     has_bp = (
         bool(report_data["best_practices"])
         or bool(missing_addon_refs)
+        or bool(hardcoded_lang_files)
         or (include_multi_globals and bool(report_data.get("bp_grouped_globals")))
     )
 
@@ -1240,6 +1250,10 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     if has_bp:
         out.append("")
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="DarkOrange"{rb}{lb}FONT="Impact"{rb}Best practices{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
+
+        if hardcoded_lang_files:
+            out.append(f"{lb}u{rb}Hardcoded language files - Use dynamic $(language){lb}/u{rb}")
+            out.append(f"{lb}spoiler{rb}\n" + "\n".join(hardcoded_lang_files) + f"\n{lb}/spoiler{rb}")
 
         if missing_addon_refs:
             out.append("")

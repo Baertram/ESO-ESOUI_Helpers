@@ -847,7 +847,8 @@ def collect_addon_context(extract_dir):
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             brace_depth = max(0, brace_depth + code_ln.count("{") - code_ln.count("}"))
-                            block_depth = max(0, block_depth + len(block_open_rx.findall(code_ln)) - len(block_close_rx.findall(code_ln)))
+                            norm_block_ln = re.sub(r'\b(?:for|while)\b[^;\n]*?\bdo\b', 'for', code_ln)
+                            block_depth = max(0, block_depth + len(block_open_rx.findall(norm_block_ln)) - len(block_close_rx.findall(norm_block_ln)))
                         for m_g in re.finditer(r'_G\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=', lua_clean):
                             g_name = m_g.group(1)
                             ln_no = lua_clean.count("\n", 0, m_g.start(1)) + 1
@@ -1400,8 +1401,9 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
             continue
         is_local_stmt = stripped.startswith("local ")
         scoped_locals = line_local_scopes[idx - 1] if idx - 1 < len(line_local_scopes) else set()
+        line_for_tokens = re.sub(r'\b(for|while)\b([^;\n]*?)\bdo\b', lambda mm: f"{mm.group(1)}{mm.group(2)}  ", line)
 
-        for m in token_rx.finditer(line):
+        for m in token_rx.finditer(line_for_tokens):
             g_open_brace, g_close_brace, g_block_open, g_block_close, var_name = m.groups()
             if g_open_brace:
                 scope_stack.append("table")

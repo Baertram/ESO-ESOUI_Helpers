@@ -651,5 +651,102 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 if os.path.exists(tmp_rep):
                     os.remove(tmp_rep)
 
+    def test_12_lam_table_callbacks_with_for_do_loops_no_false_global(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import _check_lua_global_variable_leaks
+
+        lua_src = (
+            "local options = {}\n"
+            "local function BuildOptions(CATEGORIES, sv)\n"
+            "    for i, category in ipairs(CATEGORIES) do\n"
+            "        table.insert(options, 1 + i, {\n"
+            "            type = 'dropdown',\n"
+            "            default = {},\n"
+            "            getFunc = function()\n"
+            "                local list = {}\n"
+            "                for _, choice in ipairs(category.choices) do\n"
+            "                    if sv.keep[category.key][choice.value] then list[#list + 1] = choice.value end\n"
+            "                end\n"
+            "                return list\n"
+            "            end,\n"
+            "            setFunc = function(values)\n"
+            "                local keep = sv.keep[category.key]\n"
+            "                for _, choice in ipairs(category.choices) do keep[choice.value] = false end\n"
+            "                for _, value in ipairs(values or {}) do keep[value] = true end\n"
+            "            end,\n"
+            "        })\n"
+            "    end\n"
+            "end\n"
+        )
+        ctx = {"all_global_tables": set(), "saved_variables": set()}
+        issues = []
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True):
+            _check_lua_global_variable_leaks(lua_src, lua_src.splitlines(), ctx, issues)
+        self.assertEqual(issues, [])
+
+
+    def test_13_hardcoded_language_files_in_manifest(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _parse_findings_into_report_data, _render_final_bbcode_report
+        from src.esoui_manifest_xml_analyzer import analyze_manifest_file
+
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": {"RPQuest"},
+            "saved_variables": set(),
+            "root_addon_manifests": [],
+            "root_txt_manifests": ["RPQuest.txt"],
+            "bundled_sub_addons": set(),
+        }
+
+        bad_manifest = (
+            "## Title: RPQuest\n"
+            "## APIVersion: 101051\n"
+            "lang/en.lua\n"
+            "lang/es.lua\n"
+            "RPQuest.lua\n"
+        )
+        good_manifest = (
+            "## Title: RPQuest\n"
+            "## APIVersion: 101051\n"
+            "lang/en.lua\n"
+            "lang/$(language).lua\n"
+            "RPQuest.lua\n"
+        )
+
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_manifest_xml_analyzer.get_current_api_version", return_value="101051"
+        ):
+            res_bad = analyze_manifest_file("RPQuest/RPQuest.txt", bad_manifest, ".txt", ctx)
+            res_good = analyze_manifest_file("RPQuest/RPQuest.txt", good_manifest, ".txt", ctx)
+
+        self.assertIn("Hardcoded language files - Use dynamic $(language): lang/en.lua, lang/es.lua", res_bad)
+        self.assertNotIn("Hardcoded language files", res_good)
+
+        report_data = {
+            "zip_all_entries": ["RPQuest/", "RPQuest/RPQuest.txt", "RPQuest/RPQuest.lua"],
+            "zip_flagged_paths": set(),
+            "zip_manifest_paths": {"RPQuest/RPQuest.txt"},
+            "zip_tree_bbcode": "",
+            "zip_violations": [],
+            "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+            "best_practices": defaultdict(list),
+        }
+        _parse_findings_into_report_data("RPQuest/RPQuest.txt", "manifest", res_bad, report_data)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+            tmp_rep = tf.name
+        try:
+            _render_final_bbcode_report(tmp_rep, "RPQuest.zip", "2026-11-21 08:00:00 PM", report_data)
+            with open(tmp_rep, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+            self.assertIn("[u]Hardcoded language files - Use dynamic $(language)[/u]", rendered)
+            self.assertIn("[spoiler]\nlang/en.lua\nlang/es.lua\n[/spoiler]", rendered)
+        finally:
+            if os.path.exists(tmp_rep):
+                os.remove(tmp_rep)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
