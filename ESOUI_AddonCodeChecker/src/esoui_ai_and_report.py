@@ -514,6 +514,44 @@ def _check_zip_structure(zip_path, report_data):
                 for f_item in files:
                     flagged_paths.add(f_item)
 
+            top_level_dirs = set()
+            for entry in all_entries:
+                norm_e = entry.replace("\\", "/").strip("/")
+                if not norm_e:
+                    continue
+                parts_e = norm_e.split("/")
+                first_seg = parts_e[0]
+                if first_seg.startswith(".") or first_seg.lower() in FORBIDDEN_OS_JUNK_NAMES:
+                    continue
+                if len(parts_e) > 1 or entry.endswith("/"):
+                    top_level_dirs.add(first_seg)
+
+            zip_manifest_folder_errors = []
+            has_wrong_addon_zip = False
+            has_multiple_top_dirs = len(top_level_dirs) > 1
+
+            if not top_level_dirs:
+                has_wrong_addon_zip = True
+            elif manifest_paths:
+                for m_path in sorted(manifest_paths):
+                    m_parts = m_path.replace("\\", "/").split("/")
+                    m_stem, _ = os.path.splitext(m_parts[-1])
+                    if len(m_parts) != 2 or m_parts[0] != m_stem or m_stem not in top_level_dirs:
+                        has_wrong_addon_zip = True
+                        break
+            else:
+                has_wrong_addon_zip = True
+
+            if has_wrong_addon_zip:
+                zip_manifest_folder_errors.append(
+                    ("Wrong addon zip", "Foldername must match manifest (case-sensitive)")
+                )
+            if has_multiple_top_dirs:
+                zip_manifest_folder_errors.append(
+                    ("Check addon zip", "Contains multiple folders: DO NOT OVERWRITE OTHER ADDONS FROM WITHIN YOUR ADDON!")
+                )
+
+            report_data["zip_manifest_folder_errors"] = zip_manifest_folder_errors
             report_data["zip_all_entries"] = list(all_entries)
             report_data["zip_flagged_paths"] = set(flagged_paths)
             report_data["zip_manifest_paths"] = set(manifest_paths)
@@ -1074,7 +1112,11 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         "",
         f'{lb}b{rb}{lb}u{rb}{lb}color="RoyalBlue"{rb}Addon check - report results{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}',
         f"{lb}b{rb}TIMESTAMP{lb}/b{rb}:    {timestamp_str}",
-        f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}",
+        (
+            f'{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {lb}color="Red"{rb}:mad: {zip_name}{lb}/color{rb}'
+            if report_data.get("zip_manifest_folder_errors")
+            else f"{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name}"
+        ),
     ]
 
     if report_data.get("zip_all_entries"):
@@ -1093,8 +1135,10 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     unverified_entries = report_data.get("unverified_globals") or []
     pollution_entries = report_data.get("global_var_pollution") or []
     lgb_entries = report_data.get("lgb_conflicts") or []
+    zip_mf_folder_errors = report_data.get("zip_manifest_folder_errors") or []
     has_crit = (
         bool(report_data["zip_violations"])
+        or bool(zip_mf_folder_errors)
         or bool(pollution_entries)
         or bool(lgb_entries)
         or any(bool(v) for v in report_data["critical"].values())
@@ -1124,10 +1168,16 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             rules_map = report_data["critical"].get(cat_key) or {}
             has_cat_pollution = (cat_key == "lua" and bool(pollution_entries))
             has_cat_lgb = (cat_key == "manifest" and bool(lgb_entries))
-            if not rules_map and not has_cat_pollution and not has_cat_lgb:
+            has_cat_zip_mf = (cat_key == "manifest" and bool(zip_mf_folder_errors))
+            if not rules_map and not has_cat_pollution and not has_cat_lgb and not has_cat_zip_mf:
                 continue
             out.append("")
             out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
+            if has_cat_zip_mf:
+                for z_title, z_desc in zip_mf_folder_errors:
+                    out.append(f'{lb}color="red"{rb}{lb}b{rb}{lb}u{rb}{z_title}{lb}/u{rb}{lb}/b{rb}{lb}/color{rb}')
+                    out.append(z_desc)
+                    out.append("")
 
             if has_cat_pollution:
                 out.append(f"{lb}u{rb}{lb}b{rb}Global Variable Pollution{lb}/b{rb}{lb}/u{rb}")
