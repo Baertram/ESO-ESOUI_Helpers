@@ -22,8 +22,8 @@ from src.esoui_config import (
     ESOUI_LATEST_MAX_ITEMS,
     REPORTS_BASE_DIR,
     ZIP_FOLDER,
+    format_zip_display_link,
     get_project_root_dir,
-    make_clickable_file_link,
 )
 
 
@@ -134,7 +134,6 @@ def download_zip(url, target_folder, force_download=False):
                 filename = url_end if url_end.lower().endswith(".zip") else "downloaded_addon.zip"
 
             target_path = os.path.join(permanent_zip_dir, filename)
-            short_zip_label = os.path.join("\\Zips", folder_date, filename)
 
             # Skip body download if today's cached ZIP matches remote Content-Length
             if not force_download and os.path.isfile(target_path):
@@ -143,7 +142,7 @@ def download_zip(url, target_folder, force_download=False):
                     print(
                         f"{C.GREEN}-> Cache hit! Identical ZIP already exists locally "
                         f"({C.WHITE}{local_size:,} bytes{C.GREEN}), skipping download:{C.RESET} "
-                        f"{make_clickable_file_link(target_path, display_text=short_zip_label)}"
+                        f"{format_zip_display_link(target_path)}"
                     )
                     return target_path, filename
 
@@ -165,15 +164,16 @@ def download_zip(url, target_folder, force_download=False):
                     print(
                         f"{C.GREEN}-> Cache hit! Identical SHA-256 ({C.WHITE}{remote_sha[:12]}...{C.GREEN}), "
                         f"using existing local ZIP:{C.RESET} "
-                        f"{make_clickable_file_link(target_path, display_text=short_zip_label)}"
+                        f"{format_zip_display_link(target_path)}"
                     )
                     return target_path, filename
 
             with open(target_path, "wb") as out_file:
                 out_file.write(raw_data)
 
-        print(f"{C.CYAN}-> Download finished successfully! Kept permanently in:{C.RESET} {make_clickable_file_link(target_path, display_text=short_zip_label)}")
+        print(f"{C.CYAN}-> Download finished successfully! Kept permanently in:{C.RESET} {format_zip_display_link(target_path)}")
         return target_path, filename
+
     except Exception as e:
         print(f"{C.RED}-> Error downloading file: {str(e)}{C.RESET}")
         return None, None
@@ -227,18 +227,16 @@ def handle_input(user_input, force_download=False):
         target_path = os.path.join(permanent_zip_dir, filename)
         if os.path.abspath(user_input) != os.path.abspath(target_path):
             shutil.copy2(user_input, target_path)
-        short_zip_label = os.path.join("\\Zips", now, filename)
         print(f"\n{C.CYAN}{C.BOLD}=================================================================={C.RESET}")
-        print(f"{C.CYAN}[1/4] Loading local ZIP archive:{C.RESET} {make_clickable_file_link(target_path, display_text=short_zip_label)}")
+        print(f"{C.CYAN}[1/4] Loading local ZIP archive:{C.RESET} {format_zip_display_link(target_path)}")
         return target_path, filename
 
     now = datetime.now().strftime("%y%m%d")
     check_in_zip_folder = os.path.join(ZIP_FOLDER, now, user_input if user_input.endswith(".zip") else user_input + ".zip")
     if os.path.exists(check_in_zip_folder):
         filename = os.path.basename(check_in_zip_folder)
-        short_zip_label = os.path.join("\\Zips", now, filename)
         print(f"\n{C.CYAN}{C.BOLD}=================================================================={C.RESET}")
-        print(f"{C.CYAN}[1/4] Using cached ZIP archive:{C.RESET} {make_clickable_file_link(check_in_zip_folder, display_text=short_zip_label)}")
+        print(f"{C.CYAN}[1/4] Using cached ZIP archive:{C.RESET} {format_zip_display_link(check_in_zip_folder)}")
         return check_in_zip_folder, filename
 
     print(

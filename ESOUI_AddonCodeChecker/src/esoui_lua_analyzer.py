@@ -1993,10 +1993,15 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
         return "[STATUS] FAIL\n[CRITICAL VIOLATIONS]\n" + issues_str + "\n[BEST PRACTICE SUGGESTIONS]\n" + sugg_str + ai_slop_block
 
     clean_code_for_words = strip_lua_strings_preserve_lines(comment_free_lua)
-    flattened_content = re.sub(r'\s+', ' ', clean_code_for_words)
     table_keys_to_ignore = set()
-    for block in re.findall(r'\{([^{}]+)\}', flattened_content):
-        table_keys_to_ignore.update(re.findall(r'(?<!\[)\b([A-Za-z_][A-Za-z0-9_]*)\b\s*=', block))
+    brace_depth = 0
+    for tok_m in re.finditer(r'(\{)|(\})|(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)', clean_code_for_words):
+        if tok_m.group(1):
+            brace_depth += 1
+        elif tok_m.group(2):
+            brace_depth = max(0, brace_depth - 1)
+        elif tok_m.group(3) and brace_depth >= 1:
+            table_keys_to_ignore.add(tok_m.group(3))
 
     local_defs = _collect_lua_local_identifiers(clean_code_for_words)
     all_words = set(re.findall(r'(?<![.:])\b([A-Za-z_][A-Za-z0-9_]*)\b', clean_code_for_words))

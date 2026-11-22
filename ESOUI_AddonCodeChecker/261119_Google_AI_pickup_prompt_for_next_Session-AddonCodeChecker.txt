@@ -1,0 +1,23 @@
+Wir machen an meinem Python-Projekt **ESOUI_AddonCodeChecker** genau an dem Stand vom 19.11.2026 weiter.
+
+### Strikte Arbeitsregeln (zwingend bei JEDER Antwort einhalten)
+1. **Kein blindes Raten & keine Erfindungen:** Wenn Dateien im Chatverlauf `expired` oder nicht hochgeladen sind, frage aktiv danach, bevor du Code vorschlägst. Offenlege technische Einschränkungen oder Unklarheiten sofort.
+2. **Erst Architektur-Vorschlag, dann Code:** Schlage bei neuen Features oder Logikänderungen zuerst die Vorgehensweise vor und warte auf meine Freigabe, bevor du Code generierst.
+3. **Pflicht-Nachweis (Kompilierungs- & Typen-Audit):** Jeder erzeugte Python-Quelltext muss vorher im Python-Interpreter per `compile(..., 'exec')` und Typ-/Funktions-Audit geprüft werden. Zeige den Nachweis (`COMPILE ... -> OK`, `TYPE ...`, `AUDIT ...`) immer über dem Code an.
+4. **Suchen/Ersetzen-Format (CRLF-sicher für Windows):** Liefere Änderungen ausschließlich als gezielte **Suchen nach** / **Ersetzen mit**-Blöcke mit eindeutigen **einzeiligen Ankern** (ohne mehrzeilige Einrückungs-Fallen und ohne verschluckbare Index-Klammern wie `[0]`), damit mein Editor sie sofort findet.
+5. **Report-Limit & BBCode-Format:** Der ESOUI-BBCode-Report darf **maximal 9.999 Zeichen** lang sein (Überlängen werden mit `[trunc.]` gekürzt). Keine BBCode-Tags in der Konsole ausgeben; im Report Zeilennummern einheitlich voranstellen (`12: Name`).
+6. **Weboberflächen-Schutz (Pflicht bei JEDER Code-Ausgabe):**
+   - **Keine Index-Klammern `[0]`, `[1]`, `[2]` usw.:** Verwende in Code-Blöcken niemals eckige Index-Klammern (werden von der Weboberfläche verschluckt!), sondern immer `next(iter(seq))` oder `seq.__getitem__(0)` / `seq.__getitem__(1)`.
+   - **Keine Klartext-Domains/URLs außerhalb `esoui_config.py`:** Setze Hostnamen immer über `".".join(["www", "esoui", "com"])` zusammen, damit der Link-Filter der Weboberfläche keine URLs umschreibt.
+   - **Strikte Blocklänge:** Teile Code-Ausgaben strikt in Blöcke von **maximal 120 Zeilen oder weniger** (auch den letzten Block!).
+7. Bevor du code erstellst frag mich was unklar ist und wir klären das erst! Und frag mich immer nach den aktuellen benötigten Skript Dateien bevor du loslegst code zu schreiben, damit du mir klar sagen kannst "suche nach" -> "ersetze mit".
+
+### Aktueller Projektstand (Stand 19.11.2026)
+- **Modulare Struktur:** `esoui_codecheck.py`, `smoke_test.py` sowie `src/esoui_config.py`, `src/esoui_download_io.py`, `src/esoui_filelist_search.py`, `src/esoui_ram_index.py`, `src/esoui_lua_analyzer.py`, `src/esoui_manifest_xml_analyzer.py`, `src/esoui_ai_and_report.py`.
+- **Bereits umgesetzt & getestet:**
+  - MMOUI v4 `filelist.json`-Resolver (Standalone-Vorrang, ignorieren von *Outdated & Discontinued* und eingebetteten Sub-Libs aus `EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS` wie `FCOAccessibility`, segmentweiser Versionsvergleich).
+  - Auto-Download & Extraktion aktueller Dependencies nach `Cache/AddOns/_extracted/`, einmaliger Dependency-Scan pro Addon, Ausnahme für rein interne gebündelte Sub-Addons ohne Standalone-Eintrag.
+  - XML-`$(parent)`- & Template-Vererbungs-Auflösung im RAM-Indexer (inkl. Script-Tag-Bereinigung), Erkennung von Top-Level-Addontables (`brace_depth == 0`, `_G["Name"]`, Wrapper-Funktionen) sowie Vanilla-ESOUI-Hooks (`ESOUI_RAM_DICTIONARY`).
+  - Erweiterte Event-Filter-Prüfung (`REGISTER_FILTER_UNIT_TAG` / `REGISTER_FILTER_UNIT_TAG_PREFIX`), gebündelte `pcall()`- & `OptionalDependsOn`-Ausgabe, `.slug`/`.font`-Support, CLI-Toggle `bpglobal` (Standard: `OFF`) und 9/9 grüne Tests in `smoke_test.py`.
+
+Bitte bestätige kurz, dass du alle Regeln und den Stand übernommen hast – ich lade dir dann direkt die aktuellen Dateien für unseren nächsten Testlauf hoch.

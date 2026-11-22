@@ -191,3 +191,34 @@ def make_clickable_url_link(url, color=C.CYAN, display_text=None):
     """Formats an HTTP/HTTPS URL as a clickable OSC 8 terminal hyperlink."""
     label = display_text if display_text is not None else url
     return f"\033]8;;{url}\033\\{color}\033[4m{label}{C.RESET}\033]8;;\033\\"
+
+
+def _format_relative_dated_label(file_path, base_dir, icon_prefix):
+    """Formats file_path relative to base_dir as '<icon>\\<YYMMDD>\\<filename>' (or '<icon>\\<filename>')."""
+    abs_file = os.path.abspath(file_path)
+    abs_base = os.path.abspath(base_dir)
+    try:
+        rel_path = os.path.relpath(abs_file, abs_base)
+    except ValueError:
+        rel_path = ""
+    if rel_path and not rel_path.startswith(".."):
+        rel_win = rel_path.replace("/", "\\").lstrip("\\")
+        return f"{icon_prefix}\\{rel_win}"
+    parent_dir = os.path.basename(os.path.dirname(abs_file))
+    base_name = os.path.basename(abs_file)
+    if parent_dir and parent_dir.isdigit() and len(parent_dir) == 6:
+        return f"{icon_prefix}\\{parent_dir}\\{base_name}"
+    return f"{icon_prefix}\\{base_name}"
+
+
+def format_zip_display_link(zip_path, color=C.WHITE):
+    """Formats a ZIP path as a clickable OSC 8 hyperlink labeled '📦\\<YYMMDD>\\<filename.zip>'."""
+    label = _format_relative_dated_label(zip_path, ZIP_FOLDER, "\U0001f4e6")
+    return make_clickable_file_link(zip_path, color=color, display_text=label)
+
+
+def format_report_display_link(report_path, color=C.WHITE, custom_label=None):
+    """Formats a report path as a clickable OSC 8 hyperlink labeled '📄\\<YYMMDD>\\<report.txt>' (or custom_label)."""
+    label = custom_label if custom_label is not None else _format_relative_dated_label(report_path, REPORTS_BASE_DIR, "\U0001f4c4")
+    return make_clickable_file_link(report_path, color=color, display_text=label)
+

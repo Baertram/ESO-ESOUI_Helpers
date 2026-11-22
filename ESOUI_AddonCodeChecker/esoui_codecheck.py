@@ -34,11 +34,11 @@ from src.esoui_ai_and_report import (
     handle_search_command,
     is_bp_multi_globals_enabled,
     print_addon_metadata,
+    print_multi_addon_summary,
     process_addon,
     process_latest_filelist_in_chunks,
     toggle_bp_multi_globals,
 )
-
 
 def _load_cmd_history(history_path=CMD_HISTORY_FILE):
     """Loads persisted repeat command history ('last_any', 'last_dl', 'last_search') from disk."""
@@ -195,6 +195,7 @@ def main_cli():
                 cmd_history["last_dl"] = executed_full_cmd
                 cmd_history["last_any"] = executed_full_cmd
                 _save_cmd_history(cmd_history)
+                dl_summaries = []
                 for idx_dl, addon_id in enumerate(addon_ids, 1):
                     if len(addon_ids) > 1:
                         print(f"\n{C.CYAN}[DL {idx_dl}/{len(addon_ids)}]{C.RESET}")
@@ -203,7 +204,8 @@ def main_cli():
                     print(f"{C.CYAN}-> Resolved 'dl {addon_id}' to direct download URL:{C.RESET} {C.WHITE}{dl_url}{C.RESET}")
                     zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=force_flag)
                     if zip_path and zip_name:
-                        process_addon(zip_path, zip_name)
+                        process_addon(zip_path, zip_name, known_addon_id=addon_id, summary_collector=dl_summaries)
+                print_multi_addon_summary(dl_summaries)
             continue
 
         if os.path.exists(clean) and clean.lower().endswith(".txt"):
@@ -225,6 +227,7 @@ def _run_txt_batch_file(txt_path):
     t0 = datetime.now()
     filelist_last_used_in_batch = False
     skipped_count = 0
+    batch_summaries = []
     with open(txt_path, "r", encoding="utf-8", errors="ignore") as f:
         lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
 
@@ -271,27 +274,30 @@ def _run_txt_batch_file(txt_path):
                     print(f"{C.YELLOW}[SKIP] Batch item {idx}: Addon ID {addon_id} not found or no ZIP returned. Continuing with next item...{C.RESET}")
                     skipped_count += 1
                     continue
-                process_addon(zip_path, zip_name)
+                process_addon(zip_path, zip_name, known_addon_id=addon_id, summary_collector=batch_summaries)
             continue
 
         if item_clean.lower().startswith(("http://", "https://")):
             if not is_authorized_esoui_url(item_clean):
                 print(f"{C.RED}[CRITICAL ERROR] Batch stopped at item {idx}: Unauthorized URL rejected ({item_clean})!{C.RESET}")
                 break
+            url_id_m = re.search(r'(?:dl|info)(\d+)', item_clean, flags=re.IGNORECASE)
+            url_addon_id = url_id_m.group(1) if url_id_m else None
             zip_path, zip_name = handle_input(item_clean, force_download=item_force)
             if not zip_path or not zip_name:
                 print(f"{C.YELLOW}[SKIP] Batch item {idx}: ESOUI download URL returned no ZIP archive. Continuing with next item...{C.RESET}")
                 skipped_count += 1
                 continue
-            process_addon(zip_path, zip_name)
+            process_addon(zip_path, zip_name, known_addon_id=url_addon_id, summary_collector=batch_summaries)
             continue
 
         zip_path, zip_name = handle_input(item_clean, force_download=item_force)
         if not zip_path or not zip_name:
             print(f"{C.RED}[CRITICAL ERROR] Batch stopped at item {idx} due to security/file error!{C.RESET}")
             break
-        process_addon(zip_path, zip_name)
+        process_addon(zip_path, zip_name, summary_collector=batch_summaries)
 
+    print_multi_addon_summary(batch_summaries)
     skip_note = f" ({skipped_count} skipped)" if skipped_count else ""
     print(f"=== Batch finished{skip_note} in {C.MAGENTA}{(datetime.now() - t0).total_seconds():.2f} seconds{C.RESET}. ===\n")
 

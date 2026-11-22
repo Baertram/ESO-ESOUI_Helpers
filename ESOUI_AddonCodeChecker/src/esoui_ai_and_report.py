@@ -44,7 +44,8 @@ from src.esoui_config import (
     OLLAMA_HOST,
     REPORTS_BASE_DIR,
     ZIP_FOLDER,
-    make_clickable_file_link,
+    format_report_display_link,
+    format_zip_display_link,
     make_clickable_url_link,
     print_wrapped_tree_item,
 )
@@ -161,6 +162,7 @@ def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force
         f"Processing in chunks of max {C.WHITE}{chunk_size}{C.CYAN}...{C.RESET}"
     )
 
+    checked_summaries = []
     for chunk_start in range(0, total_selected, chunk_size):
         chunk = entries[chunk_start:chunk_start + chunk_size]
         chunk_num = (chunk_start // chunk_size) + 1
@@ -184,18 +186,25 @@ def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force
             )
             zip_path, zip_name = download_zip(dl_url, ZIP_FOLDER, force_download=force_download)
             if zip_path and zip_name:
-                downloaded_batch.append((zip_path, zip_name))
+                downloaded_batch.append((zip_path, zip_name, addon_id, title_text, version_text))
             else:
                 print(f"{C.RED}  -> Skipping #{rank} (ID: {addon_id}) due to download failure.{C.RESET}")
             time.sleep(0.5)
 
         print(f"\n{C.CYAN}{C.BOLD}>>> CHUNK {chunk_num}/{total_chunks}: Checking {len(downloaded_batch)} downloaded addon(s)... <<<{C.RESET}")
-        for zip_path, zip_name in downloaded_batch:
-            process_addon(zip_path, zip_name)
+        for zip_path, zip_name, known_id, known_title, known_ver in downloaded_batch:
+            process_addon(
+                zip_path,
+                zip_name,
+                known_addon_id=known_id,
+                known_addon_title=known_title,
+                known_addon_version=known_ver,
+                summary_collector=checked_summaries,
+            )
 
+    print_multi_addon_summary(checked_summaries)
     elapsed = (datetime.now() - t0).total_seconds()
     print(f"{C.CYAN}=== '{mode_label}' finished ({C.WHITE}{total_selected}{C.CYAN} addons) in {C.MAGENTA}{elapsed:.2f} seconds{C.CYAN}. ==={C.RESET}\n")
-
 
 def process_latest_filelist_in_chunks(selected_ranks, raw_spec_label=None, chunk_size=None, force_download=False):
     """Fetches top 200 live addons from filelist.json sorted by lastUpdate and processes selected_ranks."""
@@ -1598,14 +1607,221 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
         wf.write(rendered)
 
 
-def process_addon(zip_path, zip_name):
+def _extract_primary_manifest_info(extract_dir, addon_ctx):
+    """Extracts (addon_title, addon_version_num, version_str, manifest_stem) from the primary root manifest."""
+    root_mfs = (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or [])
+    if not extract_dir or not os.path.isdir(extract_dir):
+        return "", "", "", ""
+    top_entries = os.listdir(extract_dir)
+    top_dirs = [d for d in top_entries if os.path.isdir(os.path.join(extract_dir, d))]
+    top_files = [f for f in top_entries if os.path.isfile(os.path.join(extract_dir, f))]
+    manifest_root_dir = os.path.join(extract_dir, next(iter(top_dirs))) if (len(top_dirs) == 1 and not top_files) else extract_dir
+
+    for mf_name in root_mfs:
+        mf_path = os.path.join(manifest_root_dir, mf_name)
+        if not os.path.isfile(mf_path):
+            continue
+        mf_stem = os.path.splitext(mf_name).__getitem__(0)
+        title_val = ""
+        add_on_ver_val = ""
+        ver_val = ""
+        try:
+            with open(mf_path, "r", encoding="utf-8", errors="ignore") as fh:
+                for raw_line in fh:
+                    line = raw_line.lstrip("\ufeff").strip()
+                    m_t = re.match(r"^##\s*Title\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+                    if m_t and not title_val:
+                        title_val = re.sub(r"\|c[0-9a-fA-F]{6}|\|r", "", m_t.group(1)).strip()
+                    m_av = re.match(r"^##\s*AddOnVersion\s*:\s*(\d+)", line, flags=re.IGNORECASE)
+                    if m_av and not add_on_ver_val:
+                        add_on_ver_val = m_av.group(1).strip()
+                    m_v = re.match(r"^##\s*Version\s*:\s*(.+)$", line, flags=re.IGNORECASE)
+                    if m_v and not ver_val:
+                        ver_val = m_v.group(1).strip()
+        except Exception:
+            pass
+        return title_val or mf_stem, add_on_ver_val, ver_val, mf_stem
+    return "", "", "", ""
+
+
+def _resolve_unique_esoui_id_from_filelist(addon_name, manifest_stem, add_on_ver, ver_str):
+    """
+    Searches filelist.json by addon name, manifest stem, AddOnVersion, and Version.
+    Returns the numeric ESOUI ID string ONLY if there is exactly 1 unambiguous match; otherwise None.
+    """
+    from src.esoui_filelist_search import get_filelist
+
+    try:
+        items = get_filelist(force=False)
+    except Exception:
+        return None
+    if not isinstance(items, list):
+        return None
+
+    name_targets = set()
+    for raw_n in (addon_name, manifest_stem):
+        if raw_n:
+            clean_n = re.sub(r"\|c[0-9a-fA-F]{6}|\|r", "", str(raw_n)).strip().lower()
+            if clean_n:
+                name_targets.add(clean_n)
+    if not name_targets:
+        return None
+
+    name_matches = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        eid = str(entry.get("id") or entry.get("UID") or entry.get("addon_id") or "").strip()
+        if not eid:
+            continue
+        title_low = re.sub(r"\|c[0-9a-fA-F]{6}|\|r", "", str(entry.get("title") or entry.get("UIName") or "")).strip().lower()
+        sub_addons = entry.get("addons") if isinstance(entry.get("addons"), list) else []
+        sub_paths = set()
+        for sub in sub_addons:
+            if isinstance(sub, dict):
+                raw_p = str(sub.get("path") or sub.get("dir") or sub.get("name") or "").replace("\\", "/").strip("/").lower()
+                if raw_p:
+                    sub_paths.add(raw_p)
+                    sub_paths.add(raw_p.rsplit("/", 1)[-1])
+        if (title_low and title_low in name_targets) or bool(sub_paths & name_targets):
+            name_matches.append(entry)
+
+    if len(name_matches) == 1:
+        only_entry = next(iter(name_matches))
+        return str(only_entry.get("id") or only_entry.get("UID") or only_entry.get("addon_id") or "").strip() or None
+    if not name_matches:
+        return None
+
+    narrowed = list(name_matches)
+    if add_on_ver:
+        av_hits = []
+        for entry in narrowed:
+            top_av = str(entry.get("addOnVersion") or entry.get("addonVersion") or "").strip()
+            sub_avs = {
+                str(s.get("addOnVersion") or s.get("addonVersion") or "").strip()
+                for s in (entry.get("addons") or [])
+                if isinstance(s, dict)
+            }
+            if add_on_ver == top_av or add_on_ver in sub_avs:
+                av_hits.append(entry)
+        if len(av_hits) == 1:
+            only_entry = next(iter(av_hits))
+            return str(only_entry.get("id") or only_entry.get("UID") or only_entry.get("addon_id") or "").strip() or None
+        if av_hits:
+            narrowed = av_hits
+
+    if ver_str:
+        ver_low = ver_str.strip().lower()
+        ver_hits = [
+            e for e in narrowed
+            if str(e.get("version") or e.get("UIVersion") or "").strip().lower() == ver_low
+        ]
+        if len(ver_hits) == 1:
+            only_entry = next(iter(ver_hits))
+            return str(only_entry.get("id") or only_entry.get("UID") or only_entry.get("addon_id") or "").strip() or None
+
+    return None
+
+
+def _count_report_findings(report_data):
+    """
+    Counts (manifest_count, critical_count, best_practice_count) from report_data
+    for compact inline console status badges.
+    """
+    manifest_crit_map = (report_data.get("critical") or {}).get("manifest") or {}
+    manifest_count = (
+        sum(len(entries) for entries in manifest_crit_map.values())
+        + len(report_data.get("lgb_conflicts") or ())
+        + len(report_data.get("zip_manifest_folder_errors") or ())
+    )
+
+    lua_crit_map = (report_data.get("critical") or {}).get("lua") or {}
+    xml_crit_map = (report_data.get("critical") or {}).get("xml") or {}
+    critical_count = (
+        len(report_data.get("zip_violations") or ())
+        + sum(len(entries) for entries in lua_crit_map.values())
+        + sum(len(entries) for entries in xml_crit_map.values())
+        + len(report_data.get("global_var_pollution") or ())
+        + len(report_data.get("global_func_pollution") or ())
+        + len(report_data.get("non_unique_globals") or ())
+    )
+
+    bp_map = report_data.get("best_practices") or {}
+    missing_refs = report_data.get("missing_local_addon_ref") or {}
+    bp_count = (
+        sum(len(entries) for entries in bp_map.values())
+        + sum(len(entries) for entries in missing_refs.values())
+        + len(report_data.get("hardcoded_lang_files") or ())
+        + len(report_data.get("unverified_globals") or ())
+    )
+    if is_bp_multi_globals_enabled():
+        grouped_g = report_data.get("bp_grouped_globals") or {}
+        for files_dict in grouped_g.values():
+            for hits_list in files_dict.values():
+                if len(hits_list) > 1:
+                    bp_count += 1
+
+    return manifest_count, critical_count, bp_count
+
+
+def _format_findings_status_badge(manifest_count, critical_count, bp_count):
+    """Formats inline status badge showing '✅ Clean' when all 0, or only non-zero icons (📋, ❌, 💡)."""
+    if manifest_count == 0 and critical_count == 0 and bp_count == 0:
+        return f"  {C.GREEN}\u2705 Clean{C.RESET}"
+    parts = []
+    if manifest_count > 0:
+        parts.append(f"{C.ORANGE}\U0001f4cb {manifest_count}{C.RESET}")
+    if critical_count > 0:
+        parts.append(f"{C.RED}\u274c {critical_count}{C.RESET}")
+    if bp_count > 0:
+        parts.append(f"{C.YELLOW}\U0001f4a1 {bp_count}{C.RESET}")
+    return f"  ({' | '.join(parts)})"
+
+
+def print_multi_addon_summary(summary_items):
+    """Prints a numbered clickable summary list when more than 1 add-on was checked in a batch/multi-run."""
+    if not summary_items or len(summary_items) <= 1:
+        return
+    lb, rb = chr(91), chr(93)
+    print(f"{C.CYAN}{C.BOLD}Checked add-ons summary:{C.RESET}")
+    for idx, item in enumerate(summary_items, 1):
+        aid = str(item.get("addon_id") or "").strip()
+        if aid and aid.isdigit():
+            comments_url = f"{ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX}{aid}/#comments"
+            id_badge = f"{lb}{make_clickable_url_link(comments_url, color=C.CYAN, display_text=aid)}{rb}"
+        else:
+            id_badge = f"{lb}{C.YELLOW}local{C.RESET}{rb}"
+
+        addon_name = str(item.get("addon_name") or item.get("zip_name") or "Unknown").strip()
+        report_path = item.get("report_path") or ""
+        clickable_name = (
+            format_report_display_link(report_path, color=C.WHITE, custom_label=f"\U0001f4c4 {addon_name}")
+            if report_path
+            else f"{C.WHITE}\U0001f4c4 {addon_name}{C.RESET}"
+        )
+
+        ver_disp = str(item.get("version_display") or "?").strip()
+        zip_path = item.get("zip_path") or ""
+        clickable_zip = format_zip_display_link(zip_path, color=C.CYAN) if zip_path else str(item.get("zip_name") or "")
+        status_badge = str(item.get("status_badge") or "")
+
+        print(f"  {C.WHITE}{idx}){C.RESET} {id_badge} {clickable_name} (Version: {C.GREEN}{ver_disp}{C.RESET} {clickable_zip}){status_badge}")
+
+def process_addon(
+    zip_path,
+    zip_name,
+    known_addon_id=None,
+    known_addon_title=None,
+    known_addon_version=None,
+    summary_collector=None,
+):
     """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
     addon_start_time = datetime.now()
     BATCH_LEAK_TRACKER.clear()
     BATCH_BEST_PRACTICE_TRACKER.clear()
 
     print(f"{C.CYAN}-------------------------------------------------------------------{C.RESET}")
-    clickable_zip_start = make_clickable_file_link(zip_path, color=C.WHITE, display_text=zip_name)
+    clickable_zip_start = format_zip_display_link(zip_path, color=C.WHITE)
     print(f"{C.CYAN}{C.BOLD}  ADDON START: {clickable_zip_start}")
 
     os.makedirs(EXTRACT_FOLDER, exist_ok=True)
@@ -1618,6 +1834,11 @@ def process_addon(zip_path, zip_name):
     current_report_file = os.path.join(current_date_report_dir, f"{now.strftime('%y%m%d_%H%M%S')}_{zip_clean_name}.txt")
     addon_code_bundle = []
     ai_preflight_triggered = False
+    mf_title = ""
+    mf_addon_ver = ""
+    mf_ver_str = ""
+    mf_stem = ""
+    resolved_addon_id = str(known_addon_id).strip() if known_addon_id is not None else ""
 
     report_data = {
         "zip_tree_bbcode": "",
@@ -1641,6 +1862,7 @@ def process_addon(zip_path, zip_name):
         if not is_index_built():
             build_esoui_index_once()
         addon_ctx = collect_addon_context(current_extract_dir)
+        mf_title, mf_addon_ver, mf_ver_str, mf_stem = _extract_primary_manifest_info(current_extract_dir, addon_ctx)
         xml_txt_combined = str(addon_ctx.get("xml_content") or "")
         any_global_used_in_xml = any(
             bool(re.search(r'\b' + re.escape(gt) + r'\b', xml_txt_combined))
@@ -1773,10 +1995,43 @@ def process_addon(zip_path, zip_name):
 
     _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 
+    display_addon_name = (
+        mf_title
+        or (str(known_addon_title).strip() if known_addon_title else "")
+        or mf_stem
+        or zip_clean_name
+    )
+    display_version = (
+        mf_addon_ver
+        or mf_ver_str
+        or (str(known_addon_version).strip() if known_addon_version else "")
+        or "?"
+    )
+    if not resolved_addon_id:
+        resolved_addon_id = _resolve_unique_esoui_id_from_filelist(
+            display_addon_name, mf_stem, mf_addon_ver, mf_ver_str
+        ) or ""
+
+    mf_cnt, crit_cnt, bp_cnt = _count_report_findings(report_data)
+    status_badge = _format_findings_status_badge(mf_cnt, crit_cnt, bp_cnt)
+
+    summary_entry = {
+        "addon_id": resolved_addon_id,
+        "addon_name": display_addon_name,
+        "version_display": display_version,
+        "zip_path": zip_path,
+        "zip_name": zip_name,
+        "report_path": current_report_file,
+        "status_badge": status_badge,
+    }
+    if isinstance(summary_collector, list):
+        summary_collector.append(summary_entry)
+
     if os.path.exists(EXTRACT_FOLDER):
         shutil.rmtree(EXTRACT_FOLDER)
     addon_duration = (datetime.now() - addon_start_time).total_seconds()
-    clickable_zip_end = make_clickable_file_link(zip_path, color=C.WHITE, display_text=zip_name)
-    print(f"\n{C.CYAN}[4/4] Report saved to:{C.RESET} {make_clickable_file_link(current_report_file)}")
+    clickable_zip_end = format_zip_display_link(zip_path, color=C.WHITE)
+    print(f"\n{C.CYAN}[4/4] Report saved to:{C.RESET} {format_report_display_link(current_report_file)}{status_badge}")
     print(f"{C.CYAN}{C.BOLD}  ADDON END:   {clickable_zip_end}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
     print(f"{C.CYAN}{C.BOLD}=================================================================={C.RESET}\n")
+    return summary_entry
