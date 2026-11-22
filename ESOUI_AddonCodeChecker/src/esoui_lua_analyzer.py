@@ -890,12 +890,16 @@ def collect_addon_context(extract_dir):
                         lua_texts_for_dyn_g.append((rel_f_norm, lua_clean))
                         file_locals = _collect_lua_local_identifiers(lua_no_str)
                         line_scopes = _build_line_local_scopes(lua_no_str)
-                        block_open_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b')
-                        block_close_rx = re.compile(r'\b(end|until)\b')
+                        top_level_local_tables = set()
+                        block_stack = []
+                        in_loop_header = False
                         brace_depth = 0
-                        block_depth = 0
+                        tok_rx = re.compile(r'\b(function|if|for|while|repeat|do|end|until)\b')
                         for ln_no, code_ln in enumerate(lua_no_str.splitlines(), 1):
-                            if brace_depth == 0 and block_depth == 0:
+                            if brace_depth == 0 and not block_stack:
+                                m_loc_tbl = re.match(r'^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', code_ln)
+                                if m_loc_tbl:
+                                    top_level_local_tables.add(m_loc_tbl.group(1))
                                 m_tbl = re.match(
                                     r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|([A-Za-z_][A-Za-z0-9_]*)\s*$)',
                                     code_ln,
@@ -908,9 +912,39 @@ def collect_addon_context(extract_dir):
                                     if is_valid_rhs and m_name not in file_locals and m_name not in scoped_locals and m_name not in ESOUI_GLOBAL_DEFINES:
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
+                            elif brace_depth == 0 and top_level_local_tables:
+                                m_eof_export = re.match(
+                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$',
+                                    code_ln,
+                                )
+                                if m_eof_export and m_eof_export.group(2) in top_level_local_tables:
+                                    m_name = m_eof_export.group(1)
+                                    if m_name not in file_locals and m_name not in ESOUI_GLOBAL_DEFINES:
+                                        all_global_tables.add(m_name)
+                                        global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             brace_depth = max(0, brace_depth + code_ln.count("{") - code_ln.count("}"))
-                            norm_block_ln = re.sub(r'\b(?:for|while)\b[^;\n]*?\bdo\b', 'for', code_ln)
-                            block_depth = max(0, block_depth + len(block_open_rx.findall(norm_block_ln)) - len(block_close_rx.findall(norm_block_ln)))
+                            for tm in tok_rx.finditer(code_ln):
+                                kw = tm.group(1)
+                                if kw in ("for", "while"):
+                                    block_stack.append("loop")
+                                    in_loop_header = True
+                                elif kw == "do":
+                                    if in_loop_header:
+                                        in_loop_header = False
+                                    else:
+                                        block_stack.append("do")
+                                elif kw == "repeat":
+                                    block_stack.append("repeat")
+                                elif kw in ("function", "if"):
+                                    block_stack.append(kw)
+                                elif kw == "until":
+                                    while block_stack:
+                                        if block_stack.pop() == "repeat":
+                                            break
+                                elif kw == "end" and block_stack:
+                                    if block_stack[-1] == "loop":
+                                        in_loop_header = False
+                                    block_stack.pop()
                         for m_g in re.finditer(r'_G\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=', lua_clean):
                             g_name = m_g.group(1)
                             ln_no = lua_clean.count("\n", 0, m_g.start(1)) + 1
@@ -1401,13 +1435,13 @@ def _build_line_local_scopes(code_only):
             r'\blocal\s+(?!function\b)([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)',
             stripped,
         ):
+            tail_after_decl = stripped[loc_m.end():]
             for v in loc_m.group(1).split(","):
                 clean_v = v.strip()
                 if clean_v:
                     active_scopes[-1].add(clean_v)
-            if ";" in line[loc_m.end():]:
-                line_scopes[-1].update(active_scopes[-1])
-
+                    if ";" in tail_after_decl or re.search(r'\b' + re.escape(clean_v) + r'\s*=(?!=)', tail_after_decl):
+                        line_scopes[-1].add(clean_v)
         for bm in block_rx.finditer(line):
             b_open, b_close = bm.groups()
             if b_open in ("if", "while", "repeat", "do"):

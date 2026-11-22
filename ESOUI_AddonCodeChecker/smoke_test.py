@@ -948,5 +948,58 @@ class TestEsouiModularSmoke(unittest.TestCase):
                     os.remove(tmp_rep)
 
 
+    def test_18_addon_table_exported_at_end_of_file_is_legitimate(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "ArclightTaunt")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "ArclightTaunt.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: ArclightTaunt\n## APIVersion: 101051\nCore.lua\nUI.lua\n")
+
+            core_src = (
+                'local ADDON = "ArclightTaunt"\n'
+                "local A = { targets = {}, rows = {}, demo = false }\n"
+                "A.bossAlerts = { expired = { kind = 'expired' } }\n"
+                "function A.Init()\n"
+                "    for i = 1, 3 do\n"
+                "        A.rows[i] = i\n"
+                "    end\n"
+                "end\n"
+                "ArclightTaunt = A\n"
+            )
+            ui_src = "local A = ArclightTaunt\nfunction A.Show() end\n"
+            with open(os.path.join(addon_dir, "Core.lua"), "w", encoding="utf-8") as cf:
+                cf.write(core_src)
+            with open(os.path.join(addon_dir, "UI.lua"), "w", encoding="utf-8") as uf:
+                uf.write(ui_src)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertEqual(ctx.get("all_global_tables"), {"ArclightTaunt"})
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_core = analyze_lua_file("ArclightTaunt/Core.lua", core_src, tmp_dir, ctx)
+
+            self.assertNotIn("Global Variable Pollution", res_core)
+            self.assertNotIn("Multiple Global Addon Tables", res_core)
+
+
+    def test_19_inline_anonymous_function_local_not_leaked(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import _check_lua_global_variable_leaks
+
+        lua_src = (
+            'BMR.ProfileDiagnostic("COUNT", "categories=" .. tostring((function() local n=0 for _ in pairs(addedByCategory) do n=n+1 end return n end)()))\n'
+        )
+        ctx = {"all_global_tables": {"BMR"}, "saved_variables": set()}
+        issues = []
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True):
+            _check_lua_global_variable_leaks(lua_src, lua_src.splitlines(), ctx, issues)
+        self.assertEqual(issues, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
