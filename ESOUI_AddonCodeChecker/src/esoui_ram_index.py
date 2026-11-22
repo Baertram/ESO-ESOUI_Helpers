@@ -84,6 +84,8 @@ def _read_manifest_version_info(folder_path, expected_stem=None):
         return None
     return {"add_on_version": add_on_ver, "version_str": ver_str, "manifest_path": mf_path}
 
+
+# Session and disk caches for dependency globals, local AddOns manifests, and ESO API lookup tables
 ESO_WORD_CACHE = {}
 DEPENDENCY_GLOBALS_CACHE = {}
 DEPENDENCY_DISK_CACHE_LOADED = False
@@ -94,11 +96,10 @@ ESOUI_GLOBAL_DEFINES = set()
 ESOUI_UNDOCUMENTED_SET = set()
 ESOUI_INDEX_BUILT = False
 
+# Parsed event parameter signatures and capability sets from ESOUIDocumentation.txt
 ESOUI_EVENT_PARAM_TYPES = {}
 ESOUI_EVENT_HAS_UNIT_TAG = set()
 ESOUI_EVENT_HAS_GAMEPAD_MODE = set()
-
-
 def parse_event_signatures_from_api_doc(lines):
     """
     Parst Event-Signaturen aus ESOUIDocumentation.txt, z. B.:
@@ -132,6 +133,7 @@ def parse_event_signatures_from_api_doc(lines):
         ESOUI_EVENT_PARAM_TYPES[ev_name] = parsed_params
 
 
+# Memoization table for expanded XML virtual template child suffixes
 _XML_TEMPLATE_EXPANSION_MEMO = {}
 
 
@@ -303,8 +305,6 @@ def _collect_xml_templates_from_source(x_txt, xml_template_children, inherited_t
 
         if not is_self_closing:
             tag_depth += 1
-
-
 def extract_virtual_controls_from_lua(lua_text, xml_templates_map=None):
     """
     Extracts global control names created via CreateControlFromVirtual("Prefix", parent, "Template", suffix)
@@ -352,6 +352,8 @@ def extract_virtual_controls_from_lua(lua_text, xml_templates_map=None):
                         results.append((f"{full_ctrl}{child_rel}", line_no))
 
     return results
+
+
 def _is_excluded_dependency_file(short_rel_display):
     """Checks whether '/<AddonFolder>/<SubPath>' matches any pattern in EXCLUDED_DEPENDENCY_FILES."""
     if not EXCLUDED_DEPENDENCY_FILES:
@@ -383,7 +385,6 @@ def _compute_dir_fingerprint(dir_path, addon_folder_label=None):
                 continue
             try:
                 st = os.stat(full_p)
-
                 entries.append(f"{rel_p}|{st.st_size}|{st.st_mtime_ns}")
             except OSError:
                 entries.append(f"{rel_p}|0|0")
@@ -419,15 +420,12 @@ def _load_dependency_disk_cache(cache_path=None):
                     }
     except (OSError, json.JSONDecodeError):
         pass
-
-
 def _save_dependency_disk_cache(cache_path=None):
     """Atomically persists DEPENDENCY_GLOBALS_CACHE to Cache/dependency_globals_cache.json."""
     if cache_path is None:
         cache_path = DEPENDENCY_CACHE_FILE
     try:
         parent = os.path.dirname(cache_path)
-
         if parent:
             os.makedirs(parent, exist_ok=True)
         tmp_path = cache_path + ".tmp"
@@ -488,6 +486,8 @@ def load_undocumented_globals(file_setting):
     except Exception as e:
         print(f"{C.RED}       Error reading undocumented globals file: {str(e)}{C.RESET}")
         return set(), set()
+
+
 def build_esoui_index_once():
     """Builds the in-memory lookup dictionary of all valid ESO APIs, globals, constants, and event signatures."""
     global ESOUI_INDEX_BUILT, ESOUI_UNDOCUMENTED_SET
@@ -524,7 +524,6 @@ def build_esoui_index_once():
                             ESOUI_RAM_DICTIONARY[api_name] = f"API Documentation line {line_num}: {cleaned_line}"
         except Exception as e:
             print(f"{C.RED}       Error indexing API doc: {str(e)}{C.RESET}")
-
     if os.path.exists(ESO_LIVE_SOURCE_DIR):
         t_phase = datetime.now()
         file_count = 0
@@ -622,7 +621,6 @@ def build_esoui_index_once():
                 file_count += 1
             except Exception:
                 pass
-
         for feat_key, mb_names in module_menu_bars.items():
             exact_btn_count = module_lua_btn_counts.get(feat_key, 0)
             if exact_btn_count > 0:
@@ -669,6 +667,7 @@ def build_esoui_index_once():
 
 
 def is_index_built():
+    """Returns True once build_esoui_index_once() has populated ESOUI_RAM_DICTIONARY."""
     return ESOUI_INDEX_BUILT
 
 
@@ -695,8 +694,6 @@ def get_current_api_version():
         except Exception as e:
             print(f"{C.RED}-> Error reading current API version from doc: {str(e)}{C.RESET}")
     return None
-
-
 def parse_manifest_dependencies(manifest_text):
     """Extracts DependsOn, PCDependsOn, and OptionalDependsOn entries (ignores ConsoleDependsOn)."""
     deps = []
@@ -787,12 +784,11 @@ def _ensure_cached_dependency_addon(dep_name, pkg_info, reason_text):
     except OSError as exc:
         print(f"    │       {C.RED}✖ Failed to store cached ZIP '{final_zip_path}': {exc}{C.RESET}")
         return None
-
     os.makedirs(CACHE_ADDONS_EXTRACTED_DIR, exist_ok=True)
     try:
         with zipfile.ZipFile(final_zip_path, "r") as zf:
             top_dirs = {
-                member.replace("\\", "/").split("/", 1)[0]
+                member.replace("\\", "/").split("/", 1).__getitem__(0)
                 for member in zf.namelist()
                 if member.strip() and not member.startswith("__MACOSX")
             }
@@ -815,8 +811,12 @@ def _ensure_cached_dependency_addon(dep_name, pkg_info, reason_text):
     )
     return final_scan_dir if os.path.isdir(final_scan_dir) else None
 
+
 def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, current_addon_id=None):
-    """Maps dependency globals to '/live/AddOns/<Dep>/<Subdir>/<File>:<Line>' from ESO_ADDONS_DIR."""
+    """
+    Scans declared dependencies (local AddOns + auto-cached ESOUI dependencies) and installed
+    AddOns to map all external global identifiers to '/live/AddOns/<Dep>/<File>:<Line>'.
+    """
     if not ESO_ADDONS_DIR or not os.path.isdir(ESO_ADDONS_DIR):
         return {}
 
@@ -869,7 +869,6 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, curre
         except OSError:
             pass
         LOCAL_ADDONS_MANIFEST_INDEX = idx_map
-
     addons_dir_map = {k: v[1] for k, v in LOCAL_ADDONS_MANIFEST_INDEX.items()}
     if checked_addon_names:
         for low_name, (orig_name, _, rev_deps_lower) in LOCAL_ADDONS_MANIFEST_INDEX.items():
@@ -910,6 +909,7 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, curre
     scanned_lua_count = 0
     scanned_xml_count = 0
     term_cols = shutil.get_terminal_size((100, 20)).columns
+
     def _update_scan_spinner(rel_file_display):
         nonlocal spinner_idx, scanned_any_file
         scanned_any_file = True
@@ -925,7 +925,6 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, curre
         nonlocal cache_dirty, scanned_folders_count, scanned_txt_manifests_count, scanned_addon_manifests_count, scanned_lua_count, scanned_xml_count
 
         current_hash = _compute_dir_fingerprint(folder_path, folder_label)
-
 
         cached_entry = DEPENDENCY_GLOBALS_CACHE.get(folder_label)
         if (
@@ -957,7 +956,6 @@ def collect_dependency_globals(active_extract_dir, extract_lua_globals_fn, curre
                                 break
                         except Exception:
                             pass
-
         if os.path.isdir(folder_path):
             scanned_folders_count += 1
 

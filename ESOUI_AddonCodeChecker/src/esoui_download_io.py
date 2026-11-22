@@ -28,7 +28,7 @@ from src.esoui_config import (
 
 
 def compute_file_sha256(file_path):
-    """Computes the SHA-256 hash of a local file."""
+    """Computes the SHA-256 hex digest of a local file in 64 KiB chunks."""
     h = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -40,7 +40,7 @@ def download_zip(url, target_folder, force_download=False):
     """
     Validates that the remote ESOUI response is an actual non-empty ZIP archive,
     checks today's local Zips/<YYMMDD> cache before downloading body bytes,
-    and verifies ZIP magic bytes.
+    handles ESOUI info-page Referer redirects/mirror links, and verifies ZIP magic bytes.
     """
     now = datetime.now()
     folder_date = now.strftime("%y%m%d")
@@ -51,6 +51,7 @@ def download_zip(url, target_folder, force_download=False):
     mode_tag = f" {C.YELLOW}[FORCE RE-DOWNLOAD]{C.CYAN}" if force_download else ""
     print(f"{C.CYAN}[1/4] Checking remote ZIP metadata:{mode_tag} {url} ...{C.RESET}")
     try:
+        # Maintain session cookies across ESOUI info -> direct download / mirror redirects
         cookie_jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
         opener.addheaders = [
@@ -64,6 +65,7 @@ def download_zip(url, target_folder, force_download=False):
         remote_len_hdr = response.headers.get("Content-Length")
         remote_size = int(remote_len_hdr) if (remote_len_hdr and remote_len_hdr.isdigit()) else None
 
+        # Retry with Referer header if ESOUI returns an empty HTML gate without session cookies
         if "text/html" in content_type and "attachment" not in content_disp.lower():
             raw_html_bytes = response.read()
             response.close()
@@ -91,6 +93,7 @@ def download_zip(url, target_folder, force_download=False):
                             response.close()
                 except Exception:
                     pass
+
             if "text/html" in content_type and "attachment" not in content_disp.lower():
                 html_body = raw_html_bytes.decode("iso-8859-1", errors="ignore")
                 if not html_body.strip():
@@ -116,7 +119,6 @@ def download_zip(url, target_folder, force_download=False):
             if remote_size == 0:
                 print(f"{C.RED}-> Error: Addon / download URL returned an empty (0 byte) response.{C.RESET}")
                 return None, None
-
             filename = None
             cd_match = re.search(r'filename\*?=(?:UTF-8\'\')?["\']?([^"\';]+)["\']?', content_disp, flags=re.IGNORECASE)
             if cd_match:
@@ -134,6 +136,7 @@ def download_zip(url, target_folder, force_download=False):
             target_path = os.path.join(permanent_zip_dir, filename)
             short_zip_label = os.path.join("\\Zips", folder_date, filename)
 
+            # Skip body download if today's cached ZIP matches remote Content-Length
             if not force_download and os.path.isfile(target_path):
                 local_size = os.path.getsize(target_path)
                 if remote_size is not None and local_size == remote_size and local_size > 0:
@@ -147,6 +150,7 @@ def download_zip(url, target_folder, force_download=False):
             print(f"{C.CYAN}-> Downloading {C.WHITE}{filename}{C.CYAN} ...{C.RESET}")
             raw_data = response.read()
 
+            # Verify ZIP local file header magic bytes (PK\x03\x04)
             if not raw_data or not raw_data.startswith(b"PK\x03\x04"):
                 print(
                     f"{C.RED}-> Error: Addon / download URL returned an empty page or invalid ZIP data "
@@ -181,6 +185,8 @@ def is_authorized_esoui_url(text_input):
     if not low.startswith(("http://", "https://")):
         return False
     return any(domain in low for domain in ALLOWED_DOWNLOAD_DOMAINS)
+
+
 def handle_input(user_input, force_download=False):
     """Validates user input (authorized URL with info->dl rewrite, local .zip file, or cached ZIP name)."""
     user_input = user_input.strip('"').strip("'").strip()
@@ -246,10 +252,8 @@ def handle_input(user_input, force_download=False):
         f"   - Local .zip archive or .txt batch list file{C.RESET}"
     )
     return None, None
-
-
 def read_cli_input_with_esc(prompt_text):
-    """Reads a line from the console while listening for ESC/Ctrl+C on Windows TTY."""
+    """Reads a line from the console while listening for immediate ESC or Ctrl+C cancellation on Windows TTY."""
     if os.name == "nt" and sys.stdin.isatty():
         import msvcrt
         sys.stdout.write(prompt_text)
@@ -281,7 +285,10 @@ def read_cli_input_with_esc(prompt_text):
 
 
 def parse_last_selection_spec(spec_str, max_items):
-    """Parses a selection string like '5', '2-5', or '1, 3, 7, 10-20'."""
+    """
+    Parses a 1-based number/range selection string (e.g. '5', '2-5', or '1, 3, 7, 10-20')
+    into (deduplicated_int_list, error_message_or_None).
+    """
     raw_spec = (spec_str or "").strip()
     if not raw_spec:
         return None, f"Missing selection. Examples: '5', '2-5', '1, 3, 7, 10-20' (range 1..{max_items})."
@@ -332,7 +339,7 @@ def parse_dl_command(text_input):
 
 
 def handle_clear_command(arg_str):
-    """Handles 'clear cache', 'clear cache addons', 'clear zips [YYMMDD]', and 'clear reports [YYMMDD]'."""
+    """Handles interactive deletion for 'clear cache', 'clear cache addons', 'clear zips [YYMMDD]', and 'clear reports [YYMMDD]'."""
     raw_args = (arg_str or "").strip()
     if not raw_args:
         print(
@@ -463,4 +470,3 @@ def handle_clear_command(arg_str):
         f"{C.GREEN}-> Cleanup finished: deleted {C.WHITE}{deleted_files}{C.GREEN} file(s) "
         f"and {C.WHITE}{deleted_dirs}{C.GREEN} folder(s).{C.RESET}\n"
     )
-

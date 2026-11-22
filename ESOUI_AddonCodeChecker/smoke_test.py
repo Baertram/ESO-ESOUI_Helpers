@@ -56,8 +56,8 @@ class TestEsouiModularSmoke(unittest.TestCase):
         _, err_oob = parse_last_selection_spec("201", 200)
         self.assertIsNotNone(err_oob)
 
-        valid_url = "https://" + "://esoui.com"
-        evil_url = "https://" + "://example.com"
+        valid_url = "https://" + ".".join(["www", "esoui", "com"]) + "/downloads/info5026-Test.html"
+        evil_url = "https://" + ".".join(["evil", "example", "com"]) + "/downloads/info5026-Test.html"
         self.assertTrue(is_authorized_esoui_url(valid_url))
         self.assertFalse(is_authorized_esoui_url(evil_url))
     def _sample_v4_filelist(self):
@@ -941,7 +941,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 _render_final_bbcode_report(tmp_rep, "RaffleGold.zip", "2026-11-22 12:25:00 AM", report_data)
                 with open(tmp_rep, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
-                self.assertIn("Missing local definition? In a single-file addon without XML/Bindings, everything should be kept strictly 'local'!", rendered)
+                self.assertIn("Missing local definition? Single-file addon without Bindings/XML/API calls: keep everything 'local'!", rendered)
                 self.assertNotIn("Else: Please define only 1 global table", rendered)
             finally:
                 if os.path.exists(tmp_rep):

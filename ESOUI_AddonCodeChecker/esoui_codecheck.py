@@ -97,7 +97,10 @@ def _resolve_repeat_command(clean_cmd, history_state):
 
 
 def main_cli():
-    """Runs the interactive CLI loop for ZIPs, URLs, TXT batch lists, 'dl', 'last', or 'search'."""
+    """
+    Runs the interactive CLI loop for ZIP archives, ESOUI URLs, TXT batch lists,
+    'dl', 'last', 'search', 'repeat', 'bpglobal', and 'clear' commands.
+    """
 
     print("==================================================================")
     print("               LOCAL AI ESOUI ADDON CHECKER READY                 ")
@@ -116,6 +119,7 @@ def main_cli():
     print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop a .zip archive or a .txt batch list\n")
     os.makedirs(BASE_FOLDER, exist_ok=True)
 
+    # Load persisted 'repeat' command targets across terminal sessions
     cmd_history = _load_cmd_history()
 
 
@@ -131,7 +135,7 @@ def main_cli():
 
         clean = raw.strip('"').strip("'").strip()
 
-        # 'clear' and 'bpglobal' are never stored in repeat history
+        # 'clear' and 'bpglobal' are session utilities and never overwrite repeat history
         if re.match(r'^clear(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
             handle_clear_command(clean[5:].strip())
             continue
@@ -150,7 +154,7 @@ def main_cli():
                 print(f"{C.RED}-> Error: Missing target after 'force' (e.g. 'force dl 5026' or 'force last 1-5').{C.RESET}")
                 continue
 
-        # Resolve 'repeat', 'repeat dl', or 'repeat search'
+        # Resolve 'repeat', 'repeat dl', or 'repeat search' to its stored command string
         if re.match(r'^repeat(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
             repeated_cmd, rep_err = _resolve_repeat_command(clean, cmd_history)
             if rep_err:
@@ -216,7 +220,7 @@ def main_cli():
 
 
 def _run_txt_batch_file(txt_path):
-    """Processes each command/URL/ZIP entry inside a .txt batch file sequentially."""
+    """Processes each command, ESOUI URL, or local ZIP path inside a .txt batch list sequentially."""
     print(f"\n=== Found TXT list: {os.path.basename(txt_path)} --- Starting batch processing... ===")
     t0 = datetime.now()
     filelist_last_used_in_batch = False

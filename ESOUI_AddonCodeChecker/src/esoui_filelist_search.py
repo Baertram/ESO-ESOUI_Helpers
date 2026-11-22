@@ -11,11 +11,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-FILELIST_URL = "https://" + "api.mmoui.com/v4/game/ESO/filelist.json"
+from src.esoui_config import MMOUI_FILELIST_URL
 
-
+# MMOUI v4 live add-on catalog endpoint and 15-minute RAM/Disk cache state
+FILELIST_URL = MMOUI_FILELIST_URL
 DEFAULT_CACHE_PATH = Path("Cache") / "filelist.json"
-CACHE_TTL_SECONDS = 15 * 60  # 15 Minuten
+CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 
 _RAM_CACHE: Dict[str, Any] = {
     "timestamp": 0.0,
@@ -60,9 +61,10 @@ def parse_selection_spec(spec: str, max_index: int) -> List[int]:
 
 
 def _fetch_remote_filelist(url: str = FILELIST_URL, timeout: float = 20.0) -> List[Dict[str, Any]]:
+    """Downloads and parses the raw MMOUI v4 filelist.json array from the remote API."""
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "esoui_codecheck/1.0 (+https://github.com)"},
+        headers={"User-Agent": "esoui_codecheck/1.0"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
@@ -116,21 +118,23 @@ def get_filelist(
         pass
 
     return fresh_data
-
-
 def _extract_id(entry: Dict[str, Any]) -> str:
+    """Returns the normalized string add-on ID from a v4 or legacy filelist entry."""
     return str(entry.get("id") or entry.get("UID") or entry.get("addon_id") or "").strip()
 
 
 def _extract_title(entry: Dict[str, Any]) -> str:
+    """Returns the add-on title from a filelist entry."""
     return str(entry.get("title") or entry.get("UIName") or entry.get("name") or "").strip()
 
 
 def _extract_author(entry: Dict[str, Any]) -> str:
+    """Returns the author name from a filelist entry."""
     return str(entry.get("author") or entry.get("UIAuthorName") or entry.get("authorName") or "").strip()
 
 
 def _extract_version(entry: Dict[str, Any]) -> str:
+    """Returns the display version string from a filelist entry."""
     return str(entry.get("version") or entry.get("UIVersion") or "").strip()
 
 
@@ -168,10 +172,12 @@ def extract_primary_api_version(entry: Dict[str, Any]) -> str:
 
 
 def _extract_api_version(entry: Dict[str, Any]) -> str:
+    """Alias for extract_primary_api_version()."""
     return extract_primary_api_version(entry)
 
 
 def _extract_last_update(entry: Dict[str, Any]) -> int:
+    """Returns the Unix timestamp (ms) of the add-on's last update."""
     val = entry.get("lastUpdate") or entry.get("lastupdate") or entry.get("UIDate") or 0
     try:
         return int(val)
@@ -180,15 +186,17 @@ def _extract_last_update(entry: Dict[str, Any]) -> int:
 
 
 def _is_live_addon(entry: Dict[str, Any]) -> bool:
+    """Returns True if the add-on status is 'Live' (excluding archived/unapproved entries)."""
     status = str(entry.get("addonStatus") or entry.get("status") or entry.get("state") or "Live").strip().lower()
     return status == "live"
 
 
+# MMOUI category ID for 'Discontinued & Outdated' add-ons
 DISCONTINUED_OUTDATED_CATEGORY_IDS = {157}
 
 
 def is_discontinued_or_outdated(entry: Dict[str, Any]) -> bool:
-    """Returns True if the MMOUI v4 entry belongs to the 'Discontinued & Outdated' category (categoryId 65)."""
+    """Returns True if the MMOUI v4 entry belongs to the 'Discontinued & Outdated' category (categoryId 157)."""
     raw_cat_id = entry.get("categoryId")
     if raw_cat_id is not None:
         try:
@@ -228,8 +236,6 @@ def lookup_addon_metadata(
                 "raw": entry,
             }
     return None
-
-
 def get_last_updated_addons(
     spec: str = "1-20",
     limit: int = 200,
@@ -252,6 +258,8 @@ def get_last_updated_addons(
     indices = parse_selection_spec(spec, len(top_items))
     selected = [top_items[i - 1] for i in indices]
     return selected, top_items
+
+
 def _compile_three_stage_patterns(query: str) -> List[Tuple[int, re.Pattern[str]]]:
     """
     Erzeugt bis zu 3 Regex-Stufen für Queries mit '+':
@@ -280,6 +288,7 @@ def _compile_three_stage_patterns(query: str) -> List[Tuple[int, re.Pattern[str]
 
 
 def _entry_dependencies_text(entry: Dict[str, Any]) -> str:
+    """Concatenates all required and optional dependency tokens of a filelist entry for search matching."""
     tokens: List[str] = []
     sub_addons = entry.get("addons")
     if isinstance(sub_addons, list):
@@ -345,7 +354,6 @@ def search_addons(
                 matches.append(entry)
         matches.sort(key=_extract_last_update, reverse=True)
         return matches, 1
-
     stage_buckets: Dict[int, List[re.Pattern[str]]] = {1: [], 2: [], 3: []}
     for term in terms:
         for stage, rx in _compile_three_stage_patterns(term):
@@ -372,14 +380,13 @@ def search_addons(
     return [], 3
 
 
-
-
 def select_search_results(results: Sequence[Dict[str, Any]], selection_spec: str) -> List[Dict[str, Any]]:
     """
     Wählt aus einer Suchergebnisliste Einträge anhand einer Nummern-Auswahl ('1', '1-3', '2, 5') aus.
     """
     indices = parse_selection_spec(selection_spec, len(results))
     return [results[i - 1] for i in indices]
+
 
 def _parse_numeric_addon_version(raw_val: Any) -> Optional[int]:
     """Parst ein v4-'addOnVersion'-Feld (z. B. '43', '350', '0901') in eine Ganzzahl."""
@@ -436,7 +443,6 @@ def lookup_dependency_addon_version(
                     )
                     if ver is not None:
                         return ver
-
         raw_title = _extract_title(entry).lower()
         entry_ver = _parse_numeric_addon_version(
             entry.get("addOnVersion") if entry.get("addOnVersion") is not None else entry.get("addonVersion")
@@ -474,7 +480,6 @@ def annotate_depends_on_line(
     filelist: Optional[List[Dict[str, Any]]] = None,
     bundled_internal_deps: Optional[Sequence[str]] = None,
 ) -> Tuple[str, bool, bool]:
-
     """
     Annotiert alle Dependencies in einer '## DependsOn:'-Zeile anhand der v4 filelist.json:
       ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
@@ -535,8 +540,6 @@ def _version_to_tuple(ver_val: Any) -> Tuple[int, ...]:
     if not re.match(r"^\d+(?:\.\d+)*$", clean):
         return ()
     return tuple(int(part) for part in clean.split("."))
-
-
 def compare_version_values(local_ver: Any, remote_ver: Any) -> int:
     """
     Vergleicht zwei Versionswerte:
@@ -553,6 +556,7 @@ def compare_version_values(local_ver: Any, remote_ver: Any) -> int:
         p_rem = t_rem + (0,) * (max_len - len(t_rem))
         return -1 if p_loc < p_rem else (1 if p_loc > p_rem else 0)
     return 0
+
 
 def resolve_dependency_online_package(
     dep_name: str,

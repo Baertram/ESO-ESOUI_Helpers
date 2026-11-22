@@ -29,6 +29,7 @@ from src.esoui_ram_index import (
     is_index_built,
 )
 
+# Optional lxml dependency for strict XSD schema validation of ESO UI and Bindings XML
 try:
     from lxml import etree as lxml_etree
     LXML_AVAILABLE = True
@@ -36,11 +37,13 @@ except ImportError:
     LXML_AVAILABLE = False
     lxml_etree = None
 
+# Session caches for compiled XSD schemas and one-time missing-schema warnings
 XML_SCHEMA_CACHE = {}
 XML_SCHEMA_WARNED = set()
 
 
 def _check_manifest_line_lengths(content, manifest_issues):
+    """Flags manifest lines exceeding ESO's 301-byte line buffer limit."""
     for line_num, line in enumerate(content.splitlines(), 1):
         byte_len = len(line.encode("utf-8"))
         if byte_len > 301:
@@ -97,6 +100,7 @@ def _check_manifest_saved_variables(file_name, line_num, line_str, manifest_issu
 
 
 def _check_manifest_folder_match(file_name, manifest_issues):
+    """Ensures the manifest filename matches its immediate parent directory name (case-sensitive)."""
     parts = file_name.replace("\\", "/").split("/")
     if len(parts) >= 2:
         parent_folder = parts[-2]
@@ -105,8 +109,8 @@ def _check_manifest_folder_match(file_name, manifest_issues):
             manifest_issues.append(
                 f"Manifest Filename Mismatch: Manifest '{parts[-1]}' does not match its parent folder name '{parent_folder}' (case-sensitive!)."
             )
-
 def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_suggestions, addon_ctx=None):
+    """Validates DependsOn, PCDependsOn, ConsoleDependsOn, and OptionalDependsOn tags, delimiters, versions, and existence."""
     bundled_subs = set((addon_ctx or {}).get("bundled_sub_addons") or ())
     for tag in ["DependsOn", "PCDependsOn", "ConsoleDependsOn"]:
         if line_str.startswith("## " + tag + ":") or line_str.startswith("## " + tag + " "):
@@ -147,7 +151,6 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_s
                             f"Non-existent dependency '{dep_clean}' (not found in ZIP, live/AddOns, Cache, or ESOUI) (line {line_num}): (-- {line_str})"
                         )
 
-
     if line_str.startswith("## OptionalDependsOn:") or line_str.startswith("## OptionalDependsOn "):
         if ":" in line_str:
             _, opt_raw = line_str.split(":", 1)
@@ -162,7 +165,9 @@ def _check_manifest_dependencies(line_num, line_str, manifest_issues, manifest_s
                     f"Invalid '>=' operator in OptionalDependsOn (line {line_num}): Version checks are NOT supported here (-- {' '.join(bad_opt_deps)})."
                 )
 
+
 def analyze_manifest_file(file_name, content, ext, addon_ctx):
+    """Runs all static checks on an ESO .addon or .txt manifest file and formats FAIL/PASS output."""
     manifest_issues = []
     manifest_suggestions = []
     current_api = get_current_api_version()
@@ -226,7 +231,6 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
         if f_ext.lower() in (".lua", ".xml") and re.match(r"^[A-Za-z]{2}$", stem) and stem.lower() not in NON_LANG_TWO_LETTER_STEMS:
             dir_part = norm_entry.rsplit("/", 1)[0].lower() if "/" in norm_entry else ""
             lang_code_candidates.append((dir_part, stripped))
-
     # Flag if > 1 fixed 2-letter language file is hardcoded in the same directory (or across translation folders)
     by_lang_dir = {}
     for d_part, orig_entry in lang_code_candidates:
@@ -274,7 +278,10 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
     if manifest_suggestions:
         return "[STATUS] PASS\n[CRITICAL VIOLATIONS] None\n[BEST PRACTICE SUGGESTIONS]\n" + "\n".join(["  - " + s for s in manifest_suggestions]) + dds_report_block
     return "[STATUS] PASS" + dds_report_block
+
+
 def _get_xml_schema_validator(schema_setting):
+    """Loads, compiles, and caches an lxml XMLSchema validator from the given XSD path."""
     if not LXML_AVAILABLE or lxml_etree is None:
         if "lxml_missing" not in XML_SCHEMA_WARNED:
             print(f"{C.CYAN}       [INFO] Python library 'lxml' is not installed. Skipping XSD schema validation (install via: pip install lxml).{C.RESET}")
@@ -300,6 +307,7 @@ def _get_xml_schema_validator(schema_setting):
 
 
 def _extract_xml_inline_lua_leaks(content, addon_ctx):
+    """Detects global variable or function leaks inside inline XML script tags (<OnInitialized>, <OnClicked>, etc.)."""
     leaks = []
     if not is_index_built():
         build_esoui_index_once()
@@ -334,7 +342,9 @@ def _extract_xml_inline_lua_leaks(content, addon_ctx):
                 leaks.append(f"Inline XML Lua global function leak in <{tag_name}> (line {ln_no}): (-- {orig})")
     return leaks
 
+
 def analyze_xml_file(file_name, content, addon_ctx):
+    """Validates an XML or Bindings.xml file against its XSD schema and checks inline Lua blocks for global leaks."""
     is_bindings = (os.path.basename(file_name).lower() == "bindings.xml")
     schema_setting = ESO_BINDINGS_SCHEMA_FILE if is_bindings else ESO_XML_SCHEMA_FILE
     xml_issues = []
@@ -356,7 +366,6 @@ def analyze_xml_file(file_name, content, addon_ctx):
                         combined_msg = " | ".join(grouped_xsd[err_ln])
                         xml_issues.append(f"XSD Validation Error (line {err_ln}): ({combined_msg})")
                 else:
-
                     print(f"    ├── {C.GREEN}XSD schema validation passed{C.RESET} ({os.path.basename(schema_setting)}).")
         except Exception as e:
             xml_issues.append(f"XML Syntax/Parse Error: {str(e)}")
@@ -368,7 +377,7 @@ def analyze_xml_file(file_name, content, addon_ctx):
 
 
 def analyze_file_content(file_name, content, extract_dir=None, addon_ctx=None):
-    """Dispatches a single extracted file to its appropriate static analyzer."""
+    """Dispatches a single extracted file (.lua, .xml, .addon, .txt) to its appropriate static analyzer."""
     _, ext = os.path.splitext(file_name.lower())
     active_extract_dir = extract_dir if extract_dir is not None else EXTRACT_FOLDER
     if addon_ctx is None:

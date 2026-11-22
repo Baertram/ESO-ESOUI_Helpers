@@ -7,6 +7,7 @@ import sys
 import shutil
 import textwrap
 
+# Enable verbose debug logging when '--debug' is passed on the command line
 DEBUG_MODE = "--debug" in [arg.lower() for arg in sys.argv[1:]]
 
 # ==============================================================================
@@ -14,12 +15,15 @@ DEBUG_MODE = "--debug" in [arg.lower() for arg in sys.argv[1:]]
 # ==============================================================================
 USER_HOME = os.path.expanduser("~")
 BASE_FOLDER = os.path.join(USER_HOME, "Downloads", "ESOUI_AddonCodeChecker")
-ZIP_FOLDER = os.path.join(BASE_FOLDER, "Zips")
-EXTRACT_FOLDER = os.path.join(BASE_FOLDER, "Tmp")
-REPORTS_BASE_DIR = os.path.join(BASE_FOLDER, "_Reports")
+ZIP_FOLDER = os.path.join(BASE_FOLDER, "Zips")          # Downloaded and local ZIP archives grouped by YYMMDD
+EXTRACT_FOLDER = os.path.join(BASE_FOLDER, "Tmp")       # Temporary extraction workspace wiped after each addon
+REPORTS_BASE_DIR = os.path.join(BASE_FOLDER, "_Reports")  # Generated BBCode report .txt files grouped by YYMMDD
 
+# Allowed documentation, addon asset, and blocked executable file extensions in ZIP archives
 ALLOWED_DOC_EXTENSIONS = {'.md', '.license', '.bbcode', '.log'}
-ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.slug', '.font'} | ALLOWED_DOC_EXTENSIONS
+ALLOWED_EXTENSIONS = {'.txt', '.addon', '.lua', '.xml', '.dds', '.slug', '.font', '.str', '.dat', '.lang'} | ALLOWED_DOC_EXTENSIONS
+# Allowed top-level directory prefixes for unofficial ESO language patches (must lie at ZIP root)
+ALLOWED_LANGUAGE_PATCH_ROOT_PREFIXES = ("esoui/lang/", "gamedata/lang/")
 ALLOWED_DOC_STEMS = {'readme', 'license', 'licence', 'copying', 'copyright', 'changelog', 'changes', 'change'}
 BLOCKED_EXECUTABLE_EXTENSIONS = {
     '.exe', '.bat', '.cmd', '.com', '.ps1', '.vbs', '.vbe', '.js', '.jse',
@@ -27,6 +31,8 @@ BLOCKED_EXECUTABLE_EXTENSIONS = {
     '.dll', '.sys', '.drv', '.ocx', '.cpl', '.scr', '.pif', '.dmg', '.pkg',
     '.app', '.command', '.jar', '.apk', '.elf', '.bin', '.run', '.reg'
 }
+
+# Hidden/IDE folders, OS metadata junk, and dependency scan exclusion rules
 FORBIDDEN_KEYWORDS = {'.github', '.vs', '.idea', '.git'}
 FORBIDDEN_OS_JUNK_NAMES = {"__macosx", "thumbs.db", "desktop.ini", ".ds_store"}
 EXCLUDED_DEPENDENCY_ADDON_FOLDERS = {"DumpVars"}
@@ -39,6 +45,8 @@ EXCLUDED_EMBEDDED_DEPENDENCY_ADDONS = frozenset({
 EXCLUDED_DEPENDENCY_FILES = {
     "/TamrielTradeCentre/PriceTable*.lua",
 }
+
+# Built-in Lua standard libraries, reserved keywords, and non-language 2-letter file stems
 LUA_STD_LIBS = {
     "string", "table", "math", "pairs", "ipairs", "next", "select", "unpack",
     "type", "tostring", "tonumber", "pcall", "xpcall", "error", "assert",
@@ -61,7 +69,7 @@ ESO_LIVE_SOURCE_DIR = r"Q:\Tools\!Spiele\TESO\EsoUI\esoui_src\live\esoui"
 ESO_API_DOC_FILE = r"Q:\Tools\!Spiele\TESO\EsoUI\esoui_src\live\ESOUIDocumentation.txt"
 ESO_EXTRA_GLOBALS_FILE = r"Q:\Tools\!Spiele\TESO\EsoUI\!!Parser\eso-api_base_Manual_NonGenerated.lua"
 
-# Relative paths resolve against the project root (parent of src/)
+# Relative input assets resolved against the project root (parent of src/)
 ADD_INPUT_DIR = "add_input"
 ESO_UNDOCUMENTED_GLOBALS_FILE = os.path.join(ADD_INPUT_DIR, "eso_undocumented_globals.lua")
 ESO_XML_SCHEMA_FILE = os.path.join(ADD_INPUT_DIR, "_XSD", "esoui_gui_xml.xsd")
@@ -69,8 +77,7 @@ ESO_BINDINGS_SCHEMA_FILE = os.path.join(ADD_INPUT_DIR, "_XSD", "esobindings.xsd"
 WIKI_EVENT_FILTERS_FILE = os.path.join(ADD_INPUT_DIR, "wiki_event_filters.json")
 WIKI_LGB_IDS_TXT_FILE = os.path.join(ADD_INPUT_DIR, "LibGroupBroadcast_IDs.txt")
 
-
-
+# Local ESO live AddOns folder and persistent cache paths for dependencies, filelist, and CLI history
 ESO_ADDONS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "Elder Scrolls Online", "live", "AddOns")
 CACHE_DIR = "Cache"
 CACHE_ADDONS_DIR = os.path.join(CACHE_DIR, "AddOns")
@@ -87,38 +94,44 @@ PC_IGNORED_SUBDIRS = frozenset({
     "future",
 })
 
-
 # Authorized domains and MMOUI/ESOUI limits
-ALLOWED_DOWNLOAD_DOMAINS = {"esoui.com", "://esoui.com", "mmoui.com"}
+_DOMAIN_ESOUI = ".".join(["esoui", "com"])
+_DOMAIN_ESOUI_WWW = ".".join(["www", "esoui", "com"])
+_DOMAIN_ESOUI_WIKI = ".".join(["wiki", "esoui", "com"])
+_DOMAIN_MMOUI = ".".join(["mmoui", "com"])
+_DOMAIN_MMOUI_API = ".".join(["api", "mmoui", "com"])
+
+ALLOWED_DOWNLOAD_DOMAINS = {_DOMAIN_ESOUI, _DOMAIN_ESOUI_WWW, _DOMAIN_MMOUI}
 ESOUI_LATEST_MAX_ITEMS = 200
 ESOUI_BATCH_CHUNK_SIZE = 10
 # Safe character limit for a single ESOUI / MMOUI vBulletin add-on comment
 ESOUI_COMMENT_MAX_CHARS = 9999
 
-
-_ESOUI_BASE = "https://" + "www.esoui.com"
-_ESOUI_WIKI_BASE = "https://" + "wiki.esoui.com"
+# ESOUI, ESOUI Wiki & MMOUI v4 API endpoints
+_ESOUI_BASE = "https://" + _DOMAIN_ESOUI_WWW
+_ESOUI_WIKI_BASE = "https://" + _DOMAIN_ESOUI_WIKI
+ESOUI_WIKI_HOST = _DOMAIN_ESOUI_WIKI
+MMOUI_FILELIST_URL = "https://" + _DOMAIN_MMOUI_API + "/v4/game/ESO/filelist.json"
 ESO_ADDON_DOWNLOADLINK_SEARCH_PREFIX = _ESOUI_BASE + "/downloads/info"
 ESO_ADDON_DOWNLOADLINK_REPLACE_PREFIX = _ESOUI_BASE + "/downloads/dl"
 ESOUI_UPLOAD_RULES_URL = _ESOUI_BASE + "/forums/showthread.php?t=10790"
 ESOUI_WIKI_EVENT_FILTERS_URL = _ESOUI_WIKI_BASE + "/AddFilterForEvent#Filter_Types"
 ESOUI_WIKI_LGB_EVENTS_URL = _ESOUI_WIKI_BASE + "/LibGroupBroadcast_IDs#Events"
 ESOUI_WIKI_LGB_PROTOCOLS_URL = _ESOUI_WIKI_BASE + "/LibGroupBroadcast_IDs#Protocols"
+ESOUI_WIKI_LGB_API_URL = _ESOUI_WIKI_BASE + "/api.php?action=parse&page=LibGroupBroadcast_IDs&prop=wikitext&format=json"
 
-
-
-# Local Ollama model configuration
+# Local Ollama LLM settings
 OLLAMA_HOST = "http://localhost:11434"
 MODEL_NAME = "qwen2.5-coder:14b"
 AI_NUM_CTX = 32768
 AI_TIMEOUT_SECONDS = 60
-
+# Enable ANSI escape sequence processing in Windows console hosts
 if os.name == "nt":
     os.system("")
 
 
 class C:
-    """ANSI color codes for clean console hierarchy."""
+    """ANSI color codes for structured console output."""
     RESET = "\033[0m"
     BOLD = "\033[1m"
     DIM = "\033[2m"
@@ -130,6 +143,8 @@ class C:
     MAGENTA = "\033[95m"
     CYAN = "\033[96m"
     WHITE = "\033[97m"
+
+
 def get_project_root_dir():
     """Returns the root directory containing esoui_codecheck.py (one level above src/)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -154,7 +169,6 @@ def resolve_config_file_path(file_setting):
     return candidate
 
 
-
 def print_wrapped_tree_item(text, first_prefix="    │     ", next_prefix="    │       ", color=""):
     """Wraps long console messages cleanly to terminal width while keeping tree indentation."""
     term_width = shutil.get_terminal_size((110, 24)).columns
@@ -177,4 +191,3 @@ def make_clickable_url_link(url, color=C.CYAN, display_text=None):
     """Formats an HTTP/HTTPS URL as a clickable OSC 8 terminal hyperlink."""
     label = display_text if display_text is not None else url
     return f"\033]8;;{url}\033\\{color}\033[4m{label}{C.RESET}\033]8;;\033\\"
-

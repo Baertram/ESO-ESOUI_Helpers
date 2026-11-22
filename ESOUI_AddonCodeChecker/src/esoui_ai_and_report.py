@@ -27,6 +27,7 @@ from src.esoui_config import (
     ALLOWED_DOC_EXTENSIONS,
     ALLOWED_DOC_STEMS,
     ALLOWED_EXTENSIONS,
+    ALLOWED_LANGUAGE_PATCH_ROOT_PREFIXES,
     BLOCKED_EXECUTABLE_EXTENSIONS,
     C,
     DEBUG_MODE,
@@ -75,6 +76,7 @@ except ImportError:
     except ImportError:
         CUSTOM_RULES = ""
 
+# Ollama client instance, session preflight status cache, and CLI toggle for repeated globals report
 client = Client(host=OLLAMA_HOST)
 OLLAMA_PREFLIGHT_CACHE = None
 SHOW_BP_MULTI_GLOBALS = False
@@ -90,8 +92,6 @@ def toggle_bp_multi_globals():
     global SHOW_BP_MULTI_GLOBALS
     SHOW_BP_MULTI_GLOBALS = not SHOW_BP_MULTI_GLOBALS
     return SHOW_BP_MULTI_GLOBALS
-
-
 def _format_colored_api_version(api_str, current_api=None, base_color=""):
     """
     Colors each numeric API token relative to current_api:
@@ -141,7 +141,9 @@ def print_addon_metadata(addon_id, force_refresh=False):
 
 
 def _extract_entry_api_display(item):
+    """Returns the primary API version string for a filelist entry (or '?' if missing)."""
     return extract_primary_api_version(item) or "?"
+
 
 def _process_addon_entries_in_chunks(entries, mode_label, chunk_size=None, force_download=False):
     """Downloads and checks selected filelist entries [(rank_idx, entry_dict), ...] in chunks."""
@@ -226,6 +228,8 @@ def process_latest_filelist_in_chunks(selected_ranks, raw_spec_label=None, chunk
         chunk_size=chunk_size,
         force_download=force_download,
     )
+
+
 def handle_search_command(raw_search_args, force_download=False, auto_select_spec=None):
     """Handles 'search <q1, q2>', 'search dep <d1, d2>', 'search author <a1, a2>', and 'search api <v1, !v2>' via filelist.json."""
     query_part = (raw_search_args or "").strip()
@@ -270,7 +274,6 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
     except Exception as e:
         print(f"{C.RED}[ERROR] Failed to search MMOUI filelist.json: {str(e)}{C.RESET}\n")
         return
-
     if not hits:
         print(f"{C.YELLOW}-> No matching 'Live' addons found for '{query_part}'.{C.RESET}\n")
         return
@@ -326,6 +329,8 @@ def handle_search_command(raw_search_args, force_download=False, auto_select_spe
         mode_label=f"search {mode_prefix}{query_part} [{sel_input}]",
         force_download=force_download,
     )
+
+
 def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_only=False):
     """Builds a nested vBulletin [SIZE="2"][list]...[/list][/SIZE] tree marking flagged items with :mad: and manifests with [MANIFEST]."""
     lb, rb = chr(91), chr(93)
@@ -354,7 +359,6 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_
                 node[part] = {}
             if not is_leaf_file:
                 node = node[part]
-
     def _prune_empty_dirs(sub_tree):
         for k in list(sub_tree.keys()):
             if isinstance(sub_tree[k], dict):
@@ -402,7 +406,6 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_
     return "\n".join(out_lines)
 
 
-
 def _check_zip_structure(zip_path, report_data):
     """Inspects all ZIP archive entries and populates report_data['zip_tree_bbcode'] & violations."""
     forbidden_entries = []
@@ -444,7 +447,6 @@ def _check_zip_structure(zip_path, report_data):
                         else:
                             hidden_or_os_reason = (normalized, "hidden/OS/dev file")
                         break
-
                 if hidden_or_os_reason:
                     flagged_path, reason_label = hidden_or_os_reason
                     non_addon_files.append((f"{flagged_path} ({reason_label})", True))
@@ -516,22 +518,38 @@ def _check_zip_structure(zip_path, report_data):
                     flagged_paths.add(f_item)
 
             top_level_dirs = set()
+            has_lang_patch_files = False
+            has_invalid_lang_patch_root = False
             for entry in all_entries:
                 norm_e = entry.replace("\\", "/").strip("/")
                 if not norm_e:
                     continue
                 parts_e = norm_e.split("/")
-                first_seg = parts_e[0]
+                first_seg = parts_e.__getitem__(0)
                 if first_seg.startswith(".") or first_seg.lower() in FORBIDDEN_OS_JUNK_NAMES:
                     continue
+                norm_e_slash = norm_e + ("/" if entry.endswith("/") else "")
+                low_e_slash = norm_e_slash.lower()
+                is_lang_patch_entry = any(
+                    low_e_slash.startswith(pfx) or pfx.startswith(low_e_slash)
+                    for pfx in ALLOWED_LANGUAGE_PATCH_ROOT_PREFIXES
+                )
+                if is_lang_patch_entry:
+                    if any(low_e_slash.startswith(pfx) for pfx in ALLOWED_LANGUAGE_PATCH_ROOT_PREFIXES):
+                        has_lang_patch_files = True
+                    continue
+                if "/esoui/lang/" in f"/{low_e_slash}" or "/gamedata/lang/" in f"/{low_e_slash}":
+                    has_invalid_lang_patch_root = True
                 if len(parts_e) > 1 or entry.endswith("/"):
                     top_level_dirs.add(first_seg)
 
             zip_manifest_folder_errors = []
-            has_wrong_addon_zip = False
+            has_wrong_addon_zip = has_invalid_lang_patch_root
             has_multiple_top_dirs = len(top_level_dirs) > 1
 
-            if not top_level_dirs:
+            if has_lang_patch_files and not top_level_dirs:
+                pass
+            elif not top_level_dirs:
                 has_wrong_addon_zip = True
             elif manifest_paths:
                 for m_path in sorted(manifest_paths):
@@ -571,7 +589,7 @@ def _check_zip_structure(zip_path, report_data):
 
 
 def _ensure_ollama_and_model_ready(model_name):
-    """Checks if Ollama is installed, starts the server if inactive, and warms up the LLM."""
+    """Checks if Ollama is installed, starts the server if inactive, and verifies the local model."""
     global OLLAMA_PREFLIGHT_CACHE
     if OLLAMA_PREFLIGHT_CACHE is not None:
         return OLLAMA_PREFLIGHT_CACHE
@@ -744,9 +762,9 @@ def _run_ai_code_review(addon_code_bundle):
         marker = "[SOURCE_CODE]\n"
         end_marker = f"\n### END_FILE: {orig_rel_path}"
         if marker in file_block:
-            body_part = file_block.split(marker, 1)[1]
+            body_part = file_block.split(marker, 1).__getitem__(1)
             if end_marker in body_part:
-                body_part = body_part.split(end_marker, 1)[0]
+                body_part = body_part.split(end_marker, 1).__getitem__(0)
         else:
             body_part = file_block
 
@@ -822,6 +840,7 @@ def _run_ai_code_review(addon_code_bundle):
 
     return ai_findings
 
+
 def _parse_findings_into_report_data(rel_path, category, raw_result, report_data):
     """Extracts critical violations and best-practice items from an analyzer result into grouped buckets."""
     rel_norm = rel_path.replace("\\", "/")
@@ -839,7 +858,6 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
             continue
         if s.startswith("[STATUS]") or s == "None" or not s:
             continue
-
 
         if section == "crit" and s.startswith("- "):
             item_text = s[2:].strip()
@@ -896,7 +914,6 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 code_snip = re.sub(r'^--\s*', '', raw_c)
                 report_data.setdefault("global_func_pollution", []).append((rel_norm, ln_val, code_snip))
                 continue
-
             sv_unique_m = re.match(
                 r"^Non-unique / too short SavedVariables \(use e\.g\. <AddonName>_SV\):\s*([^(]+?)\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
                 item_text,
@@ -940,7 +957,7 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
             if s.startswith("- "):
                 bp_header = s[2:].strip()
                 if bp_header.startswith("Hardcoded language files - Use dynamic $(language):"):
-                    raw_files = bp_header.split(":", 1)[1].strip()
+                    raw_files = bp_header.split(":", 1).__getitem__(1).strip()
                     for lf_item in raw_files.split(","):
                         clean_lf = lf_item.strip()
                         if clean_lf and clean_lf not in report_data.setdefault("hardcoded_lang_files", []):
@@ -985,7 +1002,6 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 elif num_m:
                     ln_no, c_txt = num_m.group(1), num_m.group(2).strip()
                     report_data["best_practices"][report_data["_last_bp_rule"]].append((rel_norm, ln_no, c_txt))
-
         elif section == "ai_slop":
             if s.startswith("pcall usage:"):
                 report_data["_last_slop_rule"] = "Possible action: Potential AI code - defensive pcall() usage (verify if needed)"
@@ -1092,13 +1108,13 @@ def _harmonize_xsd_message(raw_msg):
 
         na = b.get("not_allowed", [])
         if len(na) == 1:
-            sub_msgs.append(f"Attribute '{na[0]}' is not allowed.")
+            sub_msgs.append(f"Attribute '{na.__getitem__(0)}' is not allowed.")
         elif len(na) > 1:
             sub_msgs.append(f"Attributes {', '.join(f'{chr(39)}{a}{chr(39)}' for a in na)} are not allowed.")
 
         mr = b.get("missing_req", [])
         if len(mr) == 1:
-            sub_msgs.append(f"Required attribute '{mr[0]}' is missing.")
+            sub_msgs.append(f"Required attribute '{mr.__getitem__(0)}' is missing.")
         elif len(mr) > 1:
             sub_msgs.append(f"Required attributes {', '.join(f'{chr(39)}{a}{chr(39)}' for a in mr)} are missing.")
 
@@ -1106,7 +1122,7 @@ def _harmonize_xsd_message(raw_msg):
         if uc:
             uc_joined = ", ".join(f"'{c}'" for c in uc)
             exp_list = b.get("unexpected_expected", [])
-            exp_suffix = f" (expected {exp_list[0]})" if exp_list and exp_list[0] else ""
+            exp_suffix = f" (expected {exp_list.__getitem__(0)})" if exp_list and exp_list.__getitem__(0) else ""
             sub_msgs.append(f"Unexpected child element(s) {uc_joined}{exp_suffix}.")
 
         for rest in b.get("other", []):
@@ -1160,9 +1176,6 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         out.append(tree_bb)
     elif report_data.get("zip_tree_bbcode"):
         out.append(report_data["zip_tree_bbcode"])
-
-
-
     unverified_entries = report_data.get("unverified_globals") or []
     pollution_entries = report_data.get("global_var_pollution") or []
     func_pollution_entries = report_data.get("global_func_pollution") or []
@@ -1228,7 +1241,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                 spoiler_lines = []
                 for f_path in sorted(by_file.keys(), key=lambda x: x.lower()):
                     spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
-                    for ln_no, var_name, code_txt in sorted(by_file[f_path], key=lambda item: item[0]):
+                    for ln_no, var_name, code_txt in sorted(by_file[f_path], key=lambda item: item):
                         spoiler_lines.append(f"  {ln_no}: {var_name} ({code_txt})")
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
@@ -1250,7 +1263,6 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(f'{lb}*{rb} {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
                 out.append(f"{lb}/list{rb}")
-
             if has_cat_func_pollution:
                 out.append(f"{lb}u{rb}Global Function Pollution (leaked into _G): Keep local or attach to your single addon table{lb}/u{rb}")
                 out.append(f"{lb}list{rb}")
@@ -1259,7 +1271,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                     by_file_fn[_strip_addon_root_prefix(f_path)].append((int(ln_no), code_txt))
                 for f_path in sorted(by_file_fn.keys(), key=lambda x: x.lower()):
                     fn_lines = []
-                    for ln_no, code_txt in sorted(by_file_fn[f_path], key=lambda item: item[0]):
+                    for ln_no, code_txt in sorted(by_file_fn[f_path], key=lambda item: item):
                         prefix = f"{ln_no}: " if ln_no else ""
                         fn_lines.append(f"{prefix}{code_txt}".strip())
                     spoiler_body = "\n".join(fn_lines)
@@ -1283,7 +1295,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         if len(valid_lines) > 1:
                             loc = f"{f_path} (lines {', '.join(valid_lines)})"
                         elif len(valid_lines) == 1:
-                            loc = f"{f_path}:{valid_lines[0]}"
+                            loc = f"{f_path}:{valid_lines.__getitem__(0)}"
                         else:
                             loc = f_path
                         spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{clean_xsd}{lb}/SIZE{rb}{lb}/spoiler{rb}' if clean_xsd else ""
@@ -1344,7 +1356,6 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
                         out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
-
             if has_cat_lgb:
                 out.append(f"{lb}u{rb}LibGroupBroadcast Protocoll/Event conflict{lb}/u{rb}")
                 lgb_err = get_wiki_lgb_fetch_error()
@@ -1537,8 +1548,6 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         out.append(f'{lb}color="Green"{rb}No critical violations or best practice issues found.{lb}/color{rb}')
 
     return "\n".join(out).strip() + "\n"
-
-
 def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS):
     """Trims oversized [spoiler] bodies first, then falls back to safe line-level truncation with [trunc.]."""
     if len(rendered_text) <= max_chars:
@@ -1588,6 +1597,7 @@ def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, repor
     with open(report_file_path, "w", encoding="utf-8") as wf:
         wf.write(rendered)
 
+
 def process_addon(zip_path, zip_name):
     """Coordinates ZIP audit, extraction, static analysis, AI review, and compact BBCode report."""
     addon_start_time = datetime.now()
@@ -1615,7 +1625,6 @@ def process_addon(zip_path, zip_name):
         "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
         "best_practices": defaultdict(list),
     }
-
     print(f"{C.CYAN}[2/4] Analyzing ZIP structure and extracting archive...{C.RESET}")
     _check_zip_structure(zip_path, report_data)
 
@@ -1668,7 +1677,7 @@ def process_addon(zip_path, zip_name):
                     priority = 0 if lower_file.endswith(('.addon', '.txt')) else (1 if lower_file.endswith('.xml') else 2)
                     files_to_process.append((priority, rel_path.lower(), file, file_path, rel_path))
 
-        files_to_process.sort(key=lambda item: (item, item))
+        files_to_process.sort(key=lambda item: (item[0], item[1]))
 
         for _, _, file, file_path, rel_path in files_to_process:
             lower_file = file.lower()
@@ -1761,7 +1770,6 @@ def process_addon(zip_path, zip_name):
             all_flagged,
             report_data.get("zip_manifest_paths", set()),
         )
-
 
     _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 

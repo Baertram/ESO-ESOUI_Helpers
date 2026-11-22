@@ -12,7 +12,7 @@ from datetime import datetime
 
 
 def _fetch_esoui_wiki_text(url, accept_header="text/html,application/json,*/*;q=0.8", timeout_sec=6):
-    """Fetches a page/API response from ://esoui.com via urllib with automatic curl fallback on HTTP 403."""
+    """Fetches a page/API response from the ESOUI Wiki via urllib with automatic curl fallback on HTTP 403."""
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": accept_header})
@@ -29,9 +29,11 @@ def _fetch_esoui_wiki_text(url, accept_header="text/html,application/json,*/*;q=
         )
         return res.stdout
 
+
 from src.esoui_config import (
     C,
     ESOUI_WIKI_EVENT_FILTERS_URL,
+    ESOUI_WIKI_LGB_API_URL,
     ESOUI_WIKI_LGB_EVENTS_URL,
     ESOUI_WIKI_LGB_PROTOCOLS_URL,
     ESO_BINDINGS_SCHEMA_FILE,
@@ -61,6 +63,7 @@ from src.esoui_ram_index import (
     is_index_built,
 )
 
+# Optional lxml dependency for XSD validation helpers
 try:
     from lxml import etree as lxml_etree
     LXML_AVAILABLE = True
@@ -68,6 +71,7 @@ except ImportError:
     LXML_AVAILABLE = False
     lxml_etree = None
 
+# Session caches for compiled XML schemas, AI queue trackers, and ESOUI Wiki event filter rules
 XML_SCHEMA_CACHE = {}
 XML_SCHEMA_WARNED = set()
 
@@ -77,8 +81,6 @@ BATCH_BEST_PRACTICE_TRACKER = defaultdict(list)
 WIKI_EVENT_FILTERS_CACHE_FILE = WIKI_EVENT_FILTERS_FILE
 _WIKI_EVENT_FILTER_SESSION_LOADED = False
 _WIKI_DYNAMIC_EVENT_RULES = {}
-
-
 # ==============================================================================
 # WARTUNGSHINWEIS / HOW TO ADD NEW ESO EVENT FILTERS
 # ==============================================================================
@@ -159,6 +161,7 @@ EVENT_FILTER_RULES = {
     },
 }
 
+# Maps (EVENT_NAME, REGISTER_FILTER_*) to the 1-based callback argument index after eventCode
 FILTER_TYPE_PARAM_INDEX = {
     ("EVENT_INVENTORY_SINGLE_SLOT_UPDATE", "REGISTER_FILTER_BAG_ID"): 1,
     ("EVENT_INVENTORY_SINGLE_SLOT_UPDATE", "REGISTER_FILTER_IS_NEW_ITEM"): 3,
@@ -179,8 +182,6 @@ FILTER_TYPE_PARAM_INDEX = {
     ("EVENT_ABILITY_COOLDOWN_UPDATED", "REGISTER_FILTER_ABILITY_ID"): 1,
     ("EVENT_INTERFACE_SETTING_CHANGED", "REGISTER_FILTER_SETTING_SYSTEM_TYPE"): 1,
 }
-
-
 def _parse_wiki_event_filter_html(html_text):
     """Parst REGISTER_FILTER_* -> EVENT_* Zuordnungen aus der ESOUI-Wiki-Tabelle."""
     parsed = defaultdict(set)
@@ -188,8 +189,8 @@ def _parse_wiki_event_filter_html(html_text):
         cells = re.findall(r"<t[dh]\b[^>]*>(.*?)</t[dh]>", row_html, flags=re.DOTALL | re.IGNORECASE)
         if len(cells) < 2:
             continue
-        col1 = re.sub(r"<[^>]+>", " ", cells[0]).strip()
-        col2 = re.sub(r"<[^>]+>", " ", cells[1]).strip()
+        col1 = re.sub(r"<[^>]+>", " ", cells.__getitem__(0)).strip()
+        col2 = re.sub(r"<[^>]+>", " ", cells.__getitem__(1)).strip()
         f_match = re.search(r"\b(REGISTER_FILTER_[A-Z0-9_]+)\b", col1)
         if not f_match:
             continue
@@ -199,7 +200,6 @@ def _parse_wiki_event_filter_html(html_text):
         for ev_name in re.findall(r"\b(EVENT_[A-Z0-9_]+)\b", col2):
             parsed[ev_name].add(filter_const)
     return {ev: sorted(flts) for ev, flts in parsed.items()}
-
 
 
 def _sync_wiki_event_filters_once():
@@ -251,17 +251,16 @@ def _sync_wiki_event_filters_once():
             }
 
 
+# Session cache and fetch status for ESOUI Wiki LibGroupBroadcast protocol/event IDs
 WIKI_LGB_IDS_RAW_TXT_FILE = WIKI_LGB_IDS_TXT_FILE
 _WIKI_LGB_SESSION_LOADED = False
 _WIKI_LGB_CACHE = {"protocols": {}, "events": {}}
 _WIKI_LGB_FETCH_ERROR = None
 
+
 def get_wiki_lgb_fetch_error():
     """Returns '[Error] Access to ESOUI Wiki LibGroupBroadcast failed' if live wiki fetch failed, else None."""
     return _WIKI_LGB_FETCH_ERROR
-
-
-
 def _parse_wiki_lgb_ids_html(html_text):
     """Parst Protocols- und Events-Tabellen (id -> addon/reservation, inkl. ID-Ranges) von LibGroupBroadcast_IDs."""
     protocols = {}
@@ -279,7 +278,7 @@ def _parse_wiki_lgb_ids_html(html_text):
         if not cells:
             continue
         cleaned_cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip() for c in cells]
-        col0 = cleaned_cells[0]
+        col0 = cleaned_cells.__getitem__(0)
         id_range = []
         addon_info = ""
 
@@ -289,18 +288,18 @@ def _parse_wiki_lgb_ids_html(html_text):
 
         if col0.isdigit():
             id_range = [int(col0)]
-            if len(cleaned_cells) >= 4 and cleaned_cells[3]:
-                addon_info = cleaned_cells[3]
-            elif len(cleaned_cells) >= 2 and cleaned_cells[1]:
-                addon_info = cleaned_cells[1]
+            if len(cleaned_cells) >= 4 and cleaned_cells.__getitem__(3):
+                addon_info = cleaned_cells.__getitem__(3)
+            elif len(cleaned_cells) >= 2 and cleaned_cells.__getitem__(1):
+                addon_info = cleaned_cells.__getitem__(1)
         elif range_col0_m:
             lo, hi = int(range_col0_m.group(1)), int(range_col0_m.group(2))
             if 0 <= lo <= hi <= 2048:
                 id_range = list(range(lo, hi + 1))
-            if len(cleaned_cells) >= 4 and cleaned_cells[3]:
-                addon_info = cleaned_cells[3]
-            elif len(cleaned_cells) >= 2 and cleaned_cells[1]:
-                addon_info = cleaned_cells[1]
+            if len(cleaned_cells) >= 4 and cleaned_cells.__getitem__(3):
+                addon_info = cleaned_cells.__getitem__(3)
+            elif len(cleaned_cells) >= 2 and cleaned_cells.__getitem__(1):
+                addon_info = cleaned_cells.__getitem__(1)
         elif inline_range_m:
             lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
             if 0 <= lo <= hi <= 2048:
@@ -323,7 +322,6 @@ def _parse_wiki_lgb_ids_html(html_text):
                 else:
                     events[nid] = addon_info
     return {"protocols": protocols, "events": events}
-
 
 
 def _parse_wiki_lgb_ids_wikitext(wikitext):
@@ -417,9 +415,7 @@ def _parse_wiki_lgb_ids_wikitext(wikitext):
     return {"protocols": protocols, "events": events}
 
 
-
 def _parse_wiki_lgb_ids_plain_table(raw_text):
-
     """Parst kopierte Wiki-Tabellen (Tab-getrennt oder '200 reserved for ...') als Fallback."""
     protocols = {}
     events = {}
@@ -429,15 +425,15 @@ def _parse_wiki_lgb_ids_plain_table(raw_text):
         if not line:
             continue
         low = line.lower()
-        if "protocol" in low and not line[0].isdigit():
+        if "protocol" in low and not line.isdigit():
             current_kind = "protocols"
             continue
-        if ("custom event" in low or "event id" in low or low == "events") and not line[0].isdigit():
+        if ("custom event" in low or "event id" in low or low == "events") and not line.isdigit():
             current_kind = "events"
             continue
 
         parts = [p.strip() for p in line.split("\t") if p.strip()]
-        col0 = parts[0] if parts else line
+        col0 = parts.__getitem__(0) if parts else line
         id_range = []
         addon_info = ""
 
@@ -447,18 +443,18 @@ def _parse_wiki_lgb_ids_plain_table(raw_text):
 
         if col0.isdigit():
             id_range = [int(col0)]
-            if len(parts) >= 4 and parts[3] != "-":
-                addon_info = parts[3]
-            elif len(parts) >= 2 and parts[1] != "-":
-                addon_info = parts[1]
+            if len(parts) >= 4 and parts.__getitem__(3) != "-":
+                addon_info = parts.__getitem__(3)
+            elif len(parts) >= 2 and parts.__getitem__(1) != "-":
+                addon_info = parts.__getitem__(1)
         elif range_m:
             lo, hi = int(range_m.group(1)), int(range_m.group(2))
             if 0 <= lo <= hi <= 2048:
                 id_range = list(range(lo, hi + 1))
-            if len(parts) >= 4 and parts[3] != "-":
-                addon_info = parts[3]
-            elif len(parts) >= 2 and parts[1] != "-":
-                addon_info = parts[1]
+            if len(parts) >= 4 and parts.__getitem__(3) != "-":
+                addon_info = parts.__getitem__(3)
+            elif len(parts) >= 2 and parts.__getitem__(1) != "-":
+                addon_info = parts.__getitem__(1)
         elif inline_range_m:
             lo, hi = int(inline_range_m.group(1)), int(inline_range_m.group(2))
             if 0 <= lo <= hi <= 2048:
@@ -492,12 +488,10 @@ def _sync_wiki_lgb_ids_once():
     _WIKI_LGB_SESSION_LOADED = True
 
     base_page_url = next(iter(ESOUI_WIKI_LGB_PROTOCOLS_URL.split("#", 1)))
-    wiki_root = base_page_url.rsplit("/", 1)[0]
-    api_url = f"{wiki_root}/api.php?action=parse&page=LibGroupBroadcast_IDs&prop=wikitext&format=json"
 
     parsed_data = {}
     try:
-        raw_json = _fetch_esoui_wiki_text(api_url, accept_header="application/json,*/*;q=0.8", timeout_sec=6)
+        raw_json = _fetch_esoui_wiki_text(ESOUI_WIKI_LGB_API_URL, accept_header="application/json,*/*;q=0.8", timeout_sec=6)
         payload = json.loads(raw_json)
         wikitext = ((payload.get("parse") or {}).get("wikitext") or {}).get("*") or ""
         if wikitext:
@@ -539,7 +533,7 @@ def _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, add
     if "LibGroupBroadcast" not in clean_code and "DeclareProtocol" not in clean_code and "DeclareCustomEvent" not in clean_code:
         return
 
-    # Addon-Namen & Dependencies aus den Manifesten ermitteln
+    # Collect add-on names & verify LibGroupBroadcast dependency across manifest files
     addon_names_lower = set()
     has_lgb_dep = "LibGroupBroadcast" in clean_code
     if active_extract_dir and os.path.isdir(active_extract_dir):
@@ -565,8 +559,7 @@ def _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, add
 
     if not has_lgb_dep:
         return
-
-    # Numerische Konstanten im gesamten Addon sammeln (z. B. local PROTOCOL_ID = 200)
+    # Collect numeric constants across the add-on (e.g. local PROTOCOL_ID = 200)
     num_consts = {}
     if active_extract_dir and os.path.isdir(active_extract_dir):
         for root, _, files in os.walk(active_extract_dir):
@@ -622,7 +615,6 @@ def _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, add
                         ln = clean_code.count("\n", 0, em.start()) + 1
                         events_found.append((ln, eid))
 
-
     if not protocols_found and not events_found:
         return
 
@@ -647,7 +639,8 @@ def _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, add
         if not _is_owner_match(e_wiki):
             desc = f"Event ID {eid} (Wiki AddOn: {e_wiki})"
             lua_issues.append(f"LibGroupBroadcast Event [{eid}] conflict (line {ln}): ({desc})")
-        
+
+
 def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
     """Single-pass Lua lexer stripping comments and optionally strings while keeping line numbers."""
     if not isinstance(content, str) or not content:
@@ -667,7 +660,6 @@ def strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False):
         if j < n and content[j] == '[':
             return j - (pos + 1), j + 1
         return None
-
     while i < n:
         ch = content[i]
         if ch == '-' and i + 1 < n and content[i + 1] == '-':
@@ -764,7 +756,6 @@ def find_uncommented_libstub_hits(content):
             candidates.add(f"{resolved_owner}.{member}")
             candidates.add(f"{resolved_owner}:{member}")
         return any(c in excluded_exact or c.lower() in excluded_lower for c in candidates)
-
     hits = []
     rx = re.compile(r'\blibstub\b', flags=re.IGNORECASE)
     fn_def_rx = re.compile(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(')
@@ -799,16 +790,23 @@ def find_uncommented_libstub_hits(content):
 
     return hits
 
+
 def check_for_uncommented_libstub(content):
+    """Returns True if active (non-comment, non-excluded) LibStub usage is present in content."""
     return bool(find_uncommented_libstub_hits(content))
 
 
 def strip_lua_comments_preserve_lines(content):
+    """Strips Lua single-line and long-bracket comments while preserving string literals and line numbers."""
     return strip_lua_comments_and_strings_preserve_lines(content, keep_strings=True)
 
 
 def strip_lua_strings_preserve_lines(content):
+    """Strips Lua comments and replaces string literals with empty quotes while preserving line numbers."""
     return strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
+
+
+# Verb prefixes that indicate a public add-on API method when attached to a global add-on table
 _PUBLIC_API_FUNC_PREFIXES = (
     "get", "set", "is", "has", "can", "does", "should",
     "toggle", "enable", "disable", "register", "unregister",
@@ -816,6 +814,7 @@ _PUBLIC_API_FUNC_PREFIXES = (
     "refresh", "update", "open", "close", "show", "hide",
 )
 
+# Lua keywords/literals that cannot represent a function reference on the RHS of a table field assignment
 _NON_FUNC_RHS_TOKENS = {
     "nil", "true", "false", "and", "or", "not", "end",
     "function", "if", "then", "else", "elseif", "for", "while", "do", "return",
@@ -851,7 +850,6 @@ def _detect_public_api_functions_on_globals(lua_texts_by_rel_path, all_global_ta
     rx_field_assign = re.compile(
         r'(?:(?<!\[)\b([A-Za-z_][A-Za-z0-9_]*)|\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\])\s*=\s*(?:(function)\b|([A-Za-z_][A-Za-z0-9_.:]*))'
     )
-
     for rel_path, lua_clean in lua_texts_by_rel_path:
         rel_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/")]
         if any(p in ("lib", "libs", "libraries") for p in rel_parts):
@@ -1064,6 +1062,7 @@ def collect_addon_context(extract_dir):
                     except Exception:
                         pass
 
+        # Detect wrapper helpers assigning _G[param] = ... and resolve string literal call sites
         dyn_wrapper_funcs = {}
         func_def_rx = re.compile(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(([^)]*)\)')
         for _, l_txt in lua_texts_for_dyn_g:
@@ -1126,6 +1125,8 @@ def collect_addon_context(extract_dir):
         "bundled_sub_addons": bundled_sub_addons,
         "global_tables_by_file": dict(global_tables_by_file),
     }
+
+
 def _collect_lua_local_identifiers(code_only):
     """Collects local variables, function parameters, and loop variables in a Lua file."""
     file_locals = set(re.findall(r'\blocal\s+function\s+([A-Za-z_][A-Za-z0-9_]*)', code_only))
@@ -1145,8 +1146,6 @@ def _collect_lua_local_identifiers(code_only):
             if clean_lv:
                 file_locals.add(clean_lv)
     return file_locals
-
-
 def find_repeated_globals_in_lua(content, raw_lines, all_addon_globals, ram_dict, undoc_set, std_libs):
     """Detects globals referenced >= 2 times in a file without a local alias."""
     code_only = strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
@@ -1196,6 +1195,8 @@ def find_repeated_globals_in_lua(content, raw_lines, all_addon_globals, ram_dict
                     + "\n".join(formatted_hits)
                 )
     return primary_findings, minor_stdlib_findings
+
+
 def _split_top_level_lua_args(arg_str):
     """Splits a Lua argument list on top-level commas, respecting (), {}, [], and quotes."""
     args = []
@@ -1242,8 +1243,6 @@ def _split_top_level_lua_args(arg_str):
     if curr:
         args.append("".join(curr).strip())
     return args
-
-
 def _extract_balanced_call_args(text, open_paren_pos):
     """Returns (args_substring, close_paren_pos) starting at '(' or (None, -1)."""
     n = len(text)
@@ -1294,6 +1293,8 @@ def _extract_lua_function_body_from_offset(text, func_start_pos):
             if depth == 0:
                 return params, text[body_start:tm.start()]
     return params, text[body_start:]
+
+
 def _get_event_filter_spec(event_name):
     """Returns (allowed_filter_types_set, rule_title) for filterable ESO events or (None, None)."""
     _sync_wiki_event_filters_once()
@@ -1310,9 +1311,6 @@ def _get_event_filter_spec(event_name):
             "Use event filters for unit tags instead of checking code slower in lua",
         )
     return None, None
-
-
-
 def _check_lua_event_filters(content, raw_lines, lua_issues):
     """
     Prüft RegisterForEvent-Aufrufe für filterbare ESO-Events:
@@ -1341,7 +1339,7 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
         args = _split_top_level_lua_args(args_raw)
         if len(args) < 4:
             continue
-        handle_expr, ev_name = args[0], args[1]
+        handle_expr, ev_name = args.__getitem__(0).strip(), args.__getitem__(1).strip()
         if not ev_name.startswith("EVENT_"):
             continue
         pairs = []
@@ -1360,7 +1358,7 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
         args = _split_top_level_lua_args(args_raw)
         if len(args) < 3:
             continue
-        handle_expr, ev_name, cb_expr = args[0], args[1], args[2]
+        handle_expr, ev_name, cb_expr = args.__getitem__(0).strip(), args.__getitem__(1).strip(), args.__getitem__(2).strip()
         allowed_filters, rule_title = _get_event_filter_spec(ev_name)
         if not allowed_filters:
             continue
@@ -1403,7 +1401,6 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
             continue
         if not cb_params or not cb_body:
             continue
-
         applied_filter_types = {ft for pairs in matching_handles for ft, _ in pairs}
 
         for pairs in matching_handles:
@@ -1464,6 +1461,7 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
                             f"({orig_line} -- Use REGISTER_FILTER_UNIT_TAG instead of checking '{u_var}' in Lua)"
                         )
 
+
 def _check_lua_ai_slop_patterns(content, raw_lines):
     """Detects defensive pcall() and unnecessary 'if ESO_GLOBAL then' existence checks."""
     if not is_index_built():
@@ -1504,9 +1502,8 @@ def _check_lua_ai_slop_patterns(content, raw_lines):
         for ln, ident, orig in exists_hits:
             report_lines.append(f"  - {ln} ({ident}): --{orig}")
     return "\n".join(report_lines)
-
-
 def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
+    """Flags deprecated ZO_SavedVars:NewCharacterNameSettings calls in favor of NewCharacterIdSettings."""
     pattern = re.compile(r'ZO_SavedVars\s*:\s*NewCharacterNameSettings\b')
     for idx, line in enumerate(comment_free_lua.splitlines(), 1):
         if pattern.search(line):
@@ -1634,6 +1631,8 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
                     lua_issues.append(
                         f"Global Variable Pollution (missing 'local' for '{var_name}') (line {idx}): (-- {orig})"
                     )
+
+
 def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, addon_ctx=None):
     """Detects unconditional chat output inside EVENT_ADD_ON_LOADED / EVENT_PLAYER_ACTIVATED handlers."""
     code_no_strings = strip_lua_strings_preserve_lines(comment_free_lua)
@@ -1693,7 +1692,6 @@ def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, a
         opened = False
         hits = []
         called_funcs = []
-
         for ln in range(start_idx, len(clean_lines) + 1):
             cline = clean_lines[ln - 1]
             has_opt_in_guard = any(tok == "if" and is_opt for tok, is_opt in block_stack)
@@ -1746,6 +1744,8 @@ def _check_lua_startup_chat_spam(comment_free_lua, raw_lines, lua_suggestions, a
             "or make the loaded messages opt-in for the interested-in users (via slash_command and/or settings menu):\n"
             + formatted
         )
+
+
 def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines_list, lua_file_count, addon_ctx, lua_issues, dep_globals_set=None, file_name=""):
     """Checks global table pollution, multiple global tables, global functions, and local aliases."""
     lua_suggestions = []
@@ -1770,6 +1770,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                 f"Multiple Global Addon Tables: Found {len(addon_ctx['all_global_tables'])} global tables across the addon ({sorted_globals}). "
                 f"Only ONE global table per addon is allowed; attach sub-tables to your main addon table instead!{detail_suffix}"
             )
+
     func_def_rx = re.compile(r'^(?!local\s)function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
     for idx, c_line in enumerate(clean_lines_list, 1):
         fm = func_def_rx.match(c_line)
@@ -1783,7 +1784,6 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                     f"Global Function Pollution (leaked into _G) (line {idx}): "
                     f"Keep '{g_func}()' local or attach it to your single addon table (-- {orig})"
                 )
-
     is_library_addon = bool(addon_ctx.get("is_library"))
     lua_no_str_local = strip_lua_strings_preserve_lines(comment_free_lua)
     declared_file_locals = _collect_lua_local_identifiers(lua_no_str_local)
@@ -1799,7 +1799,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
 
     addon_anchors = set()
     for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
-        clean_a = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(mf))[0].lower())
+        clean_a = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(mf)).__getitem__(0).lower())
         if len(clean_a) >= 4:
             addon_anchors.add(clean_a)
             stripped_digits = re.sub(r"\d+$", "", clean_a)
@@ -1807,7 +1807,7 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                 addon_anchors.add(stripped_digits)
     if not addon_anchors and file_name:
         first_seg = next(iter(file_name.replace("\\", "/").split("/")), "")
-        clean_seg = re.sub(r"[^a-z0-9]", "", os.path.splitext(first_seg)[0].lower())
+        clean_seg = re.sub(r"[^a-z0-9]", "", os.path.splitext(first_seg).__getitem__(0).lower())
         if len(clean_seg) >= 4:
             addon_anchors.add(clean_seg)
 
@@ -1866,7 +1866,6 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
                 f"but '{g_table}' is still accessed directly {len(direct_usage_lines)} time(s) instead of using '{local_alias}':\n"
                 + "\n".join(formatted_hits)
             )
-
     # Check all legitimate addon/library global tables for a missing local pointer in this file
     candidate_addon_tables = sorted(
         (set(addon_ctx.get("all_global_tables") or set()) | set(global_table_matches)) - polluted_globals_in_file
