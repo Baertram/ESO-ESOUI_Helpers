@@ -13,6 +13,9 @@ A modular, cross-platform (**Windows, macOS, and Linux**) Python CLI tool for do
   - **`search author <a1, a2>`**: Filters add-ons by author name(s) (e.g. `search author Baertram`).
   - **`search api <v1, !v2>`**: Filters add-ons by supported API version or negated API version to find outdated add-ons (e.g. `search api 101051`, `search api !101051`).
   - **`dl <spec>` & ESOUI URLs**: Supports single IDs, lists, and ranges (`dl 5026`, `dl 630 3586`, `dl 630-632`), displays primary add-on metadata, and downloads the archive(s).
+  - **Automatic Dependency Resolution & Caching**:
+    - Automatically downloads and extracts missing `DependsOn` / `OptionalDependsOn` libraries from ESOUI into `Cache/AddOns/_extracted/` (prioritizing standalone entries, skipping *Outdated & Discontinued* packages and embedded sub-libraries).
+    - Scans each dependency once per session to resolve cross-addon globals without false positives.
   - **Rich Terminal Highlights**:
     - Clickable OSC 8 terminal links on add-on IDs (`(ID: 630 | ...)`) opening the ESOUI info page directly in your browser.
     - Color-coded primary `APIVersion` tokens relative to the live API (**Red** = older, **Green** = current live API, **White** = newer/PTS).
@@ -20,17 +23,28 @@ A modular, cross-platform (**Windows, macOS, and Linux**) Python CLI tool for do
   - **Persistent Repeat History (`Cache/cmd_history.json`)**:
     - **`repeat`**, **`repeat dl`**, and **`repeat search`** persist across terminal sessions (`clear` commands are excluded).
   - **`force ` prefix**: Bypasses both the `Cache/filelist.json` TTL cache and today's downloaded ZIP cache (e.g. `force last 1-3`, `force dl 5026`, `force repeat`).
+  - **`bpglobal` CLI Toggle**: Toggles the verbose *"Global variable used multiple times w/o a local reference"* report section on/off (`OFF` by default).
 - **Static Code & Archive Analysis**
-  - **ZIP Structure Audit**: Flags hidden/dev folders (`.git`, `.github`, `.idea`, `.vs`), OS junk (`__MACOSX`, `Thumbs.db`), blocked executables, and unreferenced files.
-  - **Lua Static Rules**: Detects deprecated `LibStub`, deprecated `ZO_SavedVars:NewCharacterNameSettings`, global table/function/variable leaks (missing `local`), missing `local` aliases for repeated globals, startup chat spam, and defensive `pcall()` / existence checks.
+  - **ZIP Structure Audit**:
+    - Flags hidden/dev folders (`.git`, `.github`, `.idea`, `.vs`), OS junk (`__MACOSX`, `Thumbs.db`), blocked executables, and unreferenced files.
+    - Verifies root folder-to-manifest naming (`Wrong addon zip`) and warns when a ZIP contains multiple top-level folders (`Check addon zip`).
+    - Detects legacy `.font` files and recommends migrating to `.slug` files.
+  - **Lua Static Rules**:
+    - **Global Scope & Naming Hygiene**: Detects missing `local` declarations (including inside single-line closures/callbacks), multiple global addon tables, leaked global functions, and non-unique / too short global names (`< 6` chars or not anchored to the add-on name).
+    - **Single-File Strict-Local Detection**: Detects single-file add-ons without `Bindings.xml`, XML global usage, or public API methods (`get*`, `set*`, `is*`, etc.) and instructs keeping everything strictly `local`.
+    - **ESO Event Filters (`RegisterForEvent` / `AddFilterForEvent`)**: Syncs filter mappings from the ESOUI Wiki and flags missing event filters or redundant Lua-side parameter/unit-tag checks in event callbacks.
+    - **LibGroupBroadcast ID Conflict Check**: Validates `DeclareProtocol` and `DeclareCustomEvent` IDs against the live ESOUI Wiki `LibGroupBroadcast_IDs` table.
+    - **Deprecated APIs & AI Code Hints**: Flags deprecated `LibStub`, deprecated `ZO_SavedVars:NewCharacterNameSettings`, missing `local` aliases for addon tables, defensive `pcall()` wrappers, and unnecessary existence checks on documented ESO globals.
   - **Manifest Validation (`.addon` / `.txt`)**:
-    - Checks line byte length (`<= 301` bytes), folder-to-manifest name matching, `APIVersion` currency, and duplicate `.addon` + `.txt` manifests.
+    - Checks line byte length (`<= 301` bytes), folder-to-manifest name matching, `APIVersion` currency, `SavedVariables` uniqueness/length (`>= 6` chars and anchored to the add-on/global table name), `SavedVariablesPerCharacter` misuse, and duplicate `.addon` + `.txt` manifests.
     - Validates `DependsOn` against live `addOnVersion` values in the v4 `filelist.json` (separating missing `>=` on versioned libraries as **Critical violations** from outdated `>=` minimums as **Best practices**, with inline `[current: X]` / `[AddOnVersion unknown]` annotations).
-  - **XML & XSD Schema Validation**: Validates UI XML and `Bindings.xml` against local XSD schemas (via `lxml`) and detects inline Lua global leaks inside XML event handlers with exact line numbers.
-- **Compact Grouped ESOUI BBCode Report**
+    - Flags hardcoded 2-letter language files (e.g. `en.lua`, `de.lua`) and recommends dynamic `$(language)` placeholders.
+  - **XML & XSD Schema Validation**:
+    - Validates UI XML and `Bindings.xml` against local XSD schemas (via `lxml`), resolves `$(parent)` and template control inheritance in the RAM index, and detects inline Lua global leaks inside XML event handlers with exact line numbers.
+- **Compact Grouped ESOUI BBCode Report (9,999-Char Safe)**
   - Suppresses all `PASS` noise; displays a nested `[SIZE="2"]` archive tree at the top marking detected manifests with `[MANIFEST]` and files with critical violations with `:mad:`.
-  - Groups **Critical violations** by category (`ZIP Archive`, `Manifest`, `Lua Files`, `XML Files`) and rule, and groups **Best practices** (`Possible action: ...`) with occurrence counts `(xN)` and `[spoiler][SIZE="2"]...[/SIZE][/spoiler]` code snippets.
-
+  - Groups **Critical violations** by category (`ZIP Archive`, `Manifest (.addon / .txt)`, `Lua Files`, `XML Files`) and rule, and groups **Best practices** (`Possible action: ...`) with `[spoiler][SIZE="2"]...[/SIZE][/spoiler]` code snippets.
+  - Automatically compacts spoilers and trees to stay within ESOUI's **9,999-character** comment limit (truncating safely with `[trunc.]` if needed).
 ---
 
 ## Project Structure
@@ -48,11 +62,11 @@ ESOUI_AddonCodeChecker/
     ├── __init__.py
     ├── esoui_config.py                 # Paths, file whitelists, URLs, Ollama & ANSI UI settings
     ├── esoui_filelist_search.py        # MMOUI v4 filelist.json cache, DependsOn version lookup & search
-    ├── esoui_ram_index.py              # In-memory ESO API dictionary & dependency resolver
-    ├── esoui_download_io.py            # Authorized HTTP downloader, CLI input & cleanup
-    ├── esoui_lua_analyzer.py           # Lua lexer & static rule checks (including global variable leaks)
+    ├── esoui_ram_index.py              # In-memory ESO API dictionary, XML control resolver & dependency cache
+    ├── esoui_download_io.py            # Authorized HTTP downloader, CLI input (with ESC support) & cleanup
+    ├── esoui_lua_analyzer.py           # Lua lexer & static rule checks (globals, event filters, LGB IDs)
     ├── esoui_manifest_xml_analyzer.py  # Manifest (.addon/.txt) & XML/XSD checks
-    └── esoui_ai_and_report.py          # ZIP audit, Ollama review & grouped BBCode report renderer
+    └── esoui_ai_and_report.py          # ZIP audit, chunked Ollama review & grouped BBCode report renderer
 ```
 
 ---
@@ -72,8 +86,7 @@ ESOUI_AddonCodeChecker/
 
 ## Local AI Setup (Ollama)
 
-The add-on checker can use a local **Ollama** LLM (default: `qwen2.5-coder:14b`) to semantically review files containing unverified globals or valid XML structures without sending any add-on code to external cloud services.
-
+The add-on checker can use a local **Ollama** LLM (default: `qwen2.5-coder:14b`) to semantically review files containing unverified globals or valid XML structures without sending any add-on code to external cloud services (large Lua files are automatically split into scope-safe chunks, and AI review can be aborted anytime with `ESC`).
 ### 1. Install Ollama (Windows, macOS, or Linux)
 - **Windows / macOS**: Download and run the installer from [ollama.com](https://ollama.com).
   - *Optional (Windows custom installation directory, e.g. `D:\Ollama`)*: Open a terminal in your Downloads folder and run:
@@ -113,7 +126,7 @@ python esoui_codecheck.py
 | Command | Example | Description |
 | :--- | :--- | :--- |
 | `dl <spec>` | `dl 5026` / `dl 630 3586` / `dl 630-632` | Lookup metadata & check add-on(s) by ESOUI ID |
-| `<ESOUI URL>` | `https://esoui.com/downloads/info5026` | Download & check add-on from ESOUI URL |
+| `<ESOUI URL>` | `https://esoui.com` | Download & check add-on from ESOUI URL |
 | `last <spec>` | `last 1-5 8 10-12` | Check top 200 live updated add-ons by rank |
 | `search <terms>` | `search LibAddonMenu, Master Merchant` | Search live add-ons by title, author, or ID |
 | `search dep <terms>` | `search dep LibAddonMenu-2.0` | Search live add-ons by dependency |
@@ -121,6 +134,7 @@ python esoui_codecheck.py
 | `search api <ver>` | `search api 101051` / `search api !101051` | Search live add-ons by API version (or missing version) |
 | `repeat` / `repeat dl` / `repeat search` | `repeat search` / `force repeat` | Repeat last check, `dl`, or `search` command (persisted) |
 | `force <cmd>` | `force last 1-3` | Bypass `filelist.json` and ZIP caches |
+| `bpglobal` | `bpglobal` | Toggle repeated global variable best-practice section (`ON`/`OFF`) |
 | `clear <target>` | `clear cache` / `clear zips 261115` | Clean up local cache, ZIPs, or reports |
 | `<path.zip>` / `<list.txt>` | `batch_list.txt` | Check a local ZIP archive or run a batch list |
 

@@ -809,6 +809,107 @@ def strip_lua_comments_preserve_lines(content):
 
 def strip_lua_strings_preserve_lines(content):
     return strip_lua_comments_and_strings_preserve_lines(content, keep_strings=False)
+_PUBLIC_API_FUNC_PREFIXES = (
+    "get", "set", "is", "has", "can", "does", "should",
+    "toggle", "enable", "disable", "register", "unregister",
+    "add", "remove", "create", "delete", "clear", "reset",
+    "refresh", "update", "open", "close", "show", "hide",
+)
+
+_NON_FUNC_RHS_TOKENS = {
+    "nil", "true", "false", "and", "or", "not", "end",
+    "function", "if", "then", "else", "elseif", "for", "while", "do", "return",
+}
+
+
+def _is_public_api_method_name(member_name):
+    """Returns True if member_name starts with an API verb in CamelCase or snake_case (e.g. getData, GetData, get_data)."""
+    if not member_name or len(member_name) < 3:
+        return False
+    low = member_name.lower()
+    for pref in _PUBLIC_API_FUNC_PREFIXES:
+        if low.startswith(pref) and len(member_name) > len(pref):
+            next_ch = member_name[len(pref)]
+            if next_ch.isupper() or next_ch == "_":
+                return True
+    return False
+
+
+def _detect_public_api_functions_on_globals(lua_texts_by_rel_path, all_global_tables):
+    """Detects whether any global addon table exposes API-prefixed methods (direct def, local alias ref, or table literal)."""
+    if not all_global_tables:
+        return False
+    gt_alt = "|".join(re.escape(gt) for gt in sorted(all_global_tables, key=len, reverse=True) if gt)
+    if not gt_alt:
+        return False
+
+    rx_direct_def = re.compile(rf'\bfunction\s+(?:{gt_alt})\s*[.:]\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+    rx_member_assign = re.compile(
+        rf'\b(?:{gt_alt})(?:\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)|\s*\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\])\s*=\s*(?:(function)\b|([A-Za-z_][A-Za-z0-9_.:]*))'
+    )
+    rx_table_init = re.compile(rf'(?<!local\s)\b(?:{gt_alt})\s*=\s*\{{')
+    rx_field_assign = re.compile(
+        r'(?:(?<!\[)\b([A-Za-z_][A-Za-z0-9_]*)|\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\])\s*=\s*(?:(function)\b|([A-Za-z_][A-Za-z0-9_.:]*))'
+    )
+
+    for rel_path, lua_clean in lua_texts_by_rel_path:
+        rel_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/")]
+        if any(p in ("lib", "libs", "libraries") for p in rel_parts):
+            continue
+        lua_no_str = strip_lua_strings_preserve_lines(lua_clean)
+
+        for m in rx_direct_def.finditer(lua_no_str):
+            if _is_public_api_method_name(m.group(1)):
+                return True
+
+        for m in rx_member_assign.finditer(lua_clean):
+            mem_name = m.group(1) or m.group(2)
+            is_fn_lit = bool(m.group(3))
+            rhs_ident = m.group(4) or ""
+            if not _is_public_api_method_name(mem_name):
+                continue
+            if is_fn_lit or (rhs_ident and rhs_ident not in _NON_FUNC_RHS_TOKENS):
+                return True
+
+        for tm in rx_table_init.finditer(lua_clean):
+            brace_pos = tm.end() - 1
+            depth = 0
+            in_q = None
+            esc = False
+            end_brace = -1
+            for idx in range(brace_pos, len(lua_clean)):
+                ch = lua_clean[idx]
+                if in_q:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == in_q:
+                        in_q = None
+                    continue
+                if ch in ('"', "'"):
+                    in_q = ch
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end_brace = idx
+                        break
+            if end_brace > brace_pos:
+                tbl_body = lua_clean[brace_pos + 1:end_brace]
+                for fm in rx_field_assign.finditer(tbl_body):
+                    f_name = fm.group(1) or fm.group(2)
+                    is_fn_lit = bool(fm.group(3))
+                    rhs_ident = fm.group(4) or ""
+                    if not _is_public_api_method_name(f_name):
+                        continue
+                    if is_fn_lit or (rhs_ident and rhs_ident not in _NON_FUNC_RHS_TOKENS):
+                        return True
+
+    return False
+
+
 def collect_addon_context(extract_dir):
     """Collects Bindings.xml presence, XML content, global tables, SavedVariables, and manifests."""
     has_bindings_xml = False
@@ -845,7 +946,10 @@ def collect_addon_context(extract_dir):
         global_tables_by_file = defaultdict(set)
         lua_texts_for_dyn_g = []
         lua_file_total = 0
+        own_lua_file_total = 0
         for root, _, files in os.walk(extract_dir):
+            rel_dir_parts = [p.lower() for p in os.path.relpath(root, extract_dir).replace("\\", "/").split("/") if p and p != "."]
+            in_libs_subdir = any(p in ("lib", "libs", "libraries") for p in rel_dir_parts)
             for f in files:
                 lower_f = f.lower()
                 full_path = os.path.join(root, f)
@@ -881,6 +985,8 @@ def collect_addon_context(extract_dir):
                         pass
                 elif lower_f.endswith(".lua"):
                     lua_file_total += 1
+                    if not in_libs_subdir:
+                        own_lua_file_total += 1
                     try:
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as lf:
                             raw_lua_txt = lf.read()
@@ -999,10 +1105,18 @@ def collect_addon_context(extract_dir):
             except Exception:
                 pass
 
+    has_public_api_functions = (
+        _detect_public_api_functions_on_globals(lua_texts_for_dyn_g, all_global_tables)
+        if extract_dir and os.path.exists(extract_dir)
+        else False
+    )
+
     return {
         "has_bindings_xml": has_bindings_xml,
         "is_library": is_library,
+        "has_public_api_functions": has_public_api_functions,
         "lua_file_count": lua_file_total if extract_dir and os.path.exists(extract_dir) else 0,
+        "own_lua_file_count": own_lua_file_total if extract_dir and os.path.exists(extract_dir) else 0,
         "xml_content": "\n".join(xml_combined_parts),
         "all_global_tables": all_global_tables,
         "dynamic_globals": dynamic_globals,
@@ -1435,13 +1549,11 @@ def _build_line_local_scopes(code_only):
             r'\blocal\s+(?!function\b)([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)',
             stripped,
         ):
-            tail_after_decl = stripped[loc_m.end():]
             for v in loc_m.group(1).split(","):
                 clean_v = v.strip()
                 if clean_v:
                     active_scopes[-1].add(clean_v)
-                    if ";" in tail_after_decl or re.search(r'\b' + re.escape(clean_v) + r'\s*=(?!=)', tail_after_decl):
-                        line_scopes[-1].add(clean_v)
+                    line_scopes[-1].add(clean_v)
         for bm in block_rx.finditer(line):
             b_open, b_close = bm.groups()
             if b_open in ("if", "while", "repeat", "do"):
@@ -1509,6 +1621,8 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
 
                 prefix = line[:m.start(5)].rstrip()
                 if prefix.endswith((".", ":", "[", "{", ",")) or re.search(r'\bfor$', prefix):
+                    continue
+                if re.search(r'\blocal\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*,\s*)*$', prefix):
                     continue
                 if stripped.endswith(","):
                     continue
@@ -1683,11 +1797,41 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
         if m not in declared_file_locals and m not in ESOUI_GLOBAL_DEFINES
     ]
 
+    addon_anchors = set()
+    for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+        clean_a = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(mf))[0].lower())
+        if len(clean_a) >= 4:
+            addon_anchors.add(clean_a)
+            stripped_digits = re.sub(r"\d+$", "", clean_a)
+            if len(stripped_digits) >= 4:
+                addon_anchors.add(stripped_digits)
+    if not addon_anchors and file_name:
+        first_seg = next(iter(file_name.replace("\\", "/").split("/")), "")
+        clean_seg = re.sub(r"[^a-z0-9]", "", os.path.splitext(first_seg)[0].lower())
+        if len(clean_seg) >= 4:
+            addon_anchors.add(clean_seg)
+
     aliased_globals_in_file = set()
     polluted_globals_in_file = set()
     for g_table in global_table_matches:
         used_in_xml = bool(re.search(r'\b' + re.escape(g_table) + r'\b', combined_xml_content))
         is_legitimate_global = is_library_addon or (lua_file_count > 1) or has_bindings_xml or used_in_xml
+
+        def_ln = 1
+        orig_def = ""
+        tbl_def_rx = re.compile(r'^\s*(?!local\s)' + re.escape(g_table) + r'\s*=')
+        for idx_d, c_ln in enumerate(clean_lines_list, 1):
+            if tbl_def_rx.match(c_ln):
+                def_ln = idx_d
+                orig_def = raw_lines[idx_d - 1].strip() if (idx_d - 1) < len(raw_lines) else ""
+                break
+
+        norm_gt = re.sub(r"[^a-z0-9]", "", g_table.lower())
+        has_addon_anchor = (not addon_anchors) or any(anc in norm_gt for anc in addon_anchors)
+        if len(g_table) < 6 or len(norm_gt) < 6 or not has_addon_anchor:
+            lua_issues.append(
+                f"Non-unique / too short global variable '{g_table}' (line {def_ln}): (-- {orig_def})"
+            )
 
         alias_match = re.search(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*' + re.escape(g_table) + r'(?!\s*[.:\[(])\b', lua_no_str_local)
         local_alias = alias_match.group(1) if alias_match else None
@@ -1788,10 +1932,13 @@ def extract_globals_from_lua_source(lua_code, rel_display_path):
     return exposed
 def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
     """Runs all static checks on a single Lua source file and queues unverified globals for AI."""
-    lua_file_count = sum(
-        1 for _, _, files in (os.walk(active_extract_dir) if os.path.exists(active_extract_dir) else [])
-        for f in files if f.lower().endswith('.lua')
-    )
+    lua_file_count = int(addon_ctx.get("own_lua_file_count") or addon_ctx.get("lua_file_count") or 0)
+    if lua_file_count == 0 and os.path.exists(active_extract_dir):
+        lua_file_count = sum(
+            1 for root, _, files in os.walk(active_extract_dir)
+            if not any(p in ("lib", "libs", "libraries") for p in os.path.relpath(root, active_extract_dir).replace("\\", "/").lower().split("/"))
+            for f in files if f.lower().endswith('.lua')
+        )
 
     if "dep_globals_map" not in addon_ctx:
         addon_ctx["dep_globals_map"] = collect_dependency_globals(

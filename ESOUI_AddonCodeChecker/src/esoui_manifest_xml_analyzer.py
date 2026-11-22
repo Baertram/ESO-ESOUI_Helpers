@@ -49,6 +49,53 @@ def _check_manifest_line_lengths(content, manifest_issues):
             )
 
 
+def _is_unique_addon_identifier(ident_name, addon_ctx=None, fallback_stem=None):
+    """Returns True if ident_name is >= 6 chars and clearly anchored to the addon/manifest/global-table name."""
+    if not ident_name or len(ident_name) < 6:
+        return False
+    norm_id = re.sub(r"[^a-z0-9]", "", ident_name.lower())
+    if len(norm_id) < 6:
+        return False
+
+    anchors = set()
+    if fallback_stem:
+        anchors.add(fallback_stem)
+    if addon_ctx:
+        for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+            anchors.add(os.path.splitext(os.path.basename(mf))[0])
+        for gt in (addon_ctx.get("all_global_tables") or ()):
+            if len(gt) >= 6:
+                anchors.add(gt)
+
+    norm_anchors = set()
+    for anc in anchors:
+        clean_a = re.sub(r"[^a-z0-9]", "", str(anc).lower())
+        if len(clean_a) >= 4:
+            norm_anchors.add(clean_a)
+            stripped_digits = re.sub(r"\d+$", "", clean_a)
+            if len(stripped_digits) >= 4:
+                norm_anchors.add(stripped_digits)
+
+    return any(anc in norm_id for anc in norm_anchors)
+
+
+def _check_manifest_saved_variables(file_name, line_num, line_str, manifest_issues, addon_ctx=None):
+    """Flags SavedVariables that are shorter than 6 chars or lack the addon/global-table name."""
+    m_sv = re.match(r"^##\s*SavedVariables\s*:\s*(.+)$", line_str, flags=re.IGNORECASE)
+    if not m_sv:
+        return
+    sv_rhs = re.split(r"[#;]", m_sv.group(1), maxsplit=1)[0]
+    sv_names = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", sv_rhs)
+    if not sv_names:
+        return
+    manifest_stem = os.path.splitext(os.path.basename(file_name))[0]
+    bad_vars = [sv for sv in sv_names if not _is_unique_addon_identifier(sv, addon_ctx=addon_ctx, fallback_stem=manifest_stem)]
+    if bad_vars:
+        manifest_issues.append(
+            f"Non-unique / too short SavedVariables (use e.g. <AddonName>_SV): {', '.join(bad_vars)} (line {line_num}): (-- {line_str})"
+        )
+
+
 def _check_manifest_folder_match(file_name, manifest_issues):
     parts = file_name.replace("\\", "/").split("/")
     if len(parts) >= 2:
@@ -132,6 +179,7 @@ def analyze_manifest_file(file_name, content, ext, addon_ctx):
             manifest_issues.append(
                 f"Non supported SavedVariable definition (line {line_num}): Use '## SavedVariables:' instead (-- {line_str})."
             )
+        _check_manifest_saved_variables(file_name, line_num, line_str, manifest_issues, addon_ctx=addon_ctx)
         if ":" in line_str:
             left_part, _ = line_str.split(":", 1)
             if left_part.endswith(" "):

@@ -897,6 +897,27 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 report_data.setdefault("global_func_pollution", []).append((rel_norm, ln_val, code_snip))
                 continue
 
+            sv_unique_m = re.match(
+                r"^Non-unique / too short SavedVariables \(use e\.g\. <AddonName>_SV\):\s*([^(]+?)\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if sv_unique_m:
+                bad_vars_str = ", ".join(v.strip() for v in sv_unique_m.group(1).split(",") if v.strip())
+                line_no = sv_unique_m.group(2).strip()
+                rule_hdr = "Non-unique / too short SavedVariables (use e.g. <AddonName>_SV)"
+                report_data["critical"][category][rule_hdr].append((rel_norm, line_no, bad_vars_str))
+                continue
+
+            non_unique_g_m = re.match(
+                r"^Non-unique / too short global variable '([^']+)'\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if non_unique_g_m:
+                var_name = non_unique_g_m.group(1).strip()
+                line_no = int(non_unique_g_m.group(2))
+                report_data.setdefault("non_unique_globals", []).append((rel_norm, line_no, var_name))
+                continue
+
             if item_text.startswith("Multiple Global Addon Tables:"):
                 m_multi = re.search(r'\(([^()]+)\)\s*$', item_text)
                 tbl_detail = m_multi.group(1).strip() if m_multi else ""
@@ -1145,6 +1166,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     unverified_entries = report_data.get("unverified_globals") or []
     pollution_entries = report_data.get("global_var_pollution") or []
     func_pollution_entries = report_data.get("global_func_pollution") or []
+    non_unique_global_entries = report_data.get("non_unique_globals") or []
     lgb_entries = report_data.get("lgb_conflicts") or []
     zip_mf_folder_errors = report_data.get("zip_manifest_folder_errors") or []
     has_crit = (
@@ -1152,6 +1174,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         or bool(zip_mf_folder_errors)
         or bool(pollution_entries)
         or bool(func_pollution_entries)
+        or bool(non_unique_global_entries)
         or bool(lgb_entries)
         or any(bool(v) for v in report_data["critical"].values())
     )
@@ -1180,9 +1203,10 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             rules_map = report_data["critical"].get(cat_key) or {}
             has_cat_pollution = (cat_key == "lua" and bool(pollution_entries))
             has_cat_func_pollution = (cat_key == "lua" and bool(func_pollution_entries))
+            has_cat_non_unique_g = (cat_key == "lua" and bool(non_unique_global_entries))
             has_cat_lgb = (cat_key == "manifest" and bool(lgb_entries))
             has_cat_zip_mf = (cat_key == "manifest" and bool(zip_mf_folder_errors))
-            if not rules_map and not has_cat_pollution and not has_cat_func_pollution and not has_cat_lgb and not has_cat_zip_mf:
+            if not rules_map and not has_cat_pollution and not has_cat_func_pollution and not has_cat_non_unique_g and not has_cat_lgb and not has_cat_zip_mf:
                 continue
             out.append("")
             out.append(f'{lb}b{rb}{lb}FONT="Book Antiqua"{rb}{cat_label}{lb}/FONT{rb}{lb}/b{rb}')
@@ -1195,7 +1219,7 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             if has_cat_pollution:
                 out.append(f"{lb}u{rb}{lb}b{rb}Global Variable Pollution{lb}/b{rb}{lb}/u{rb}")
                 if report_data.get("is_strict_local_addon"):
-                    out.append("Missing local definition? In a single-file addon without XML/Bindings, everything should be kept strictly 'local'!")
+                    out.append("Missing local definition? Single-file addon without Bindings/XML/API calls: keep everything 'local'!")
                 else:
                     out.append("Missing local definition? Else: Please define only 1 global table for your addon, and add all relevant functions/tables/controls/variables to it")
                 by_file = defaultdict(list)
@@ -1208,6 +1232,24 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                         spoiler_lines.append(f"  {ln_no}: {var_name} ({code_txt})")
                 spoiler_body = "\n".join(spoiler_lines)
                 out.append(f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
+
+            if has_cat_non_unique_g:
+                out.append(f"{lb}u{rb}Non-unique / too short global variable{lb}/u{rb}")
+                out.append(f"{lb}list{rb}")
+                by_file_nu = defaultdict(lambda: defaultdict(list))
+                for f_path, ln_no, var_name in non_unique_global_entries:
+                    short_nu = _strip_addon_root_prefix(f_path)
+                    if var_name not in by_file_nu[short_nu][int(ln_no)]:
+                        by_file_nu[short_nu][int(ln_no)].append(var_name)
+                spoiler_lines = []
+                for f_path in sorted(by_file_nu.keys(), key=lambda x: x.lower()):
+                    spoiler_lines.append(f"{lb}u{rb}{lb}b{rb}{f_path}{lb}/b{rb}{lb}/u{rb}")
+                    for ln_no in sorted(by_file_nu[f_path].keys()):
+                        vars_joined = ", ".join(by_file_nu[f_path][ln_no])
+                        spoiler_lines.append(f"{ln_no}: {vars_joined}")
+                spoiler_body = "\n".join(spoiler_lines)
+                out.append(f'{lb}*{rb} {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}')
+                out.append(f"{lb}/list{rb}")
 
             if has_cat_func_pollution:
                 out.append(f"{lb}u{rb}Global Function Pollution (leaked into _G): Keep local or attach to your single addon table{lb}/u{rb}")
@@ -1590,11 +1632,19 @@ def process_addon(zip_path, zip_name):
         if not is_index_built():
             build_esoui_index_once()
         addon_ctx = collect_addon_context(current_extract_dir)
+        xml_txt_combined = str(addon_ctx.get("xml_content") or "")
+        any_global_used_in_xml = any(
+            bool(re.search(r'\b' + re.escape(gt) + r'\b', xml_txt_combined))
+            for gt in (addon_ctx.get("all_global_tables") or ())
+            if gt
+        )
+        own_lua_cnt = int(addon_ctx.get("own_lua_file_count") or addon_ctx.get("lua_file_count") or 0)
         report_data["is_strict_local_addon"] = (
-            int(addon_ctx.get("lua_file_count") or 0) <= 1
+            own_lua_cnt <= 1
             and not bool(addon_ctx.get("has_bindings_xml"))
             and not bool(addon_ctx.get("is_library"))
-            and not bool(str(addon_ctx.get("xml_content") or "").strip())
+            and not bool(addon_ctx.get("has_public_api_functions"))
+            and not any_global_used_in_xml
         )
         id_m = re.search(r'(?:^|[_-])(\d{2,6})(?:[_.-]|$)', zip_clean_name)
         if id_m:
@@ -1692,6 +1742,8 @@ def process_addon(zip_path, zip_name):
     for f_path, _, _, _ in report_data.get("global_var_pollution") or []:
         all_flagged.add(f_path)
     for f_path, _, _ in report_data.get("global_func_pollution") or []:
+        all_flagged.add(f_path)
+    for f_path, _, _ in report_data.get("non_unique_globals") or []:
         all_flagged.add(f_path)
     for f_path, _, _ in report_data.get("lgb_conflicts") or []:
         all_flagged.add(f_path)
