@@ -1109,6 +1109,16 @@ def collect_addon_context(extract_dir):
         if extract_dir and os.path.exists(extract_dir)
         else False
     )
+    primary_mf_stem = ""
+    for mf in root_addon_manifests + root_txt_manifests:
+        primary_mf_stem = os.path.splitext(os.path.basename(mf)).__getitem__(0)
+        if primary_mf_stem:
+            break
+    addon_loaded_state = (
+        _collect_addon_loaded_state(lua_texts_for_dyn_g, all_global_tables, primary_mf_stem)
+        if extract_dir and os.path.exists(extract_dir)
+        else None
+    )
 
     return {
         "has_bindings_xml": has_bindings_xml,
@@ -1124,6 +1134,7 @@ def collect_addon_context(extract_dir):
         "root_txt_manifests": root_txt_manifests,
         "bundled_sub_addons": bundled_sub_addons,
         "global_tables_by_file": dict(global_tables_by_file),
+        "addon_loaded_state": addon_loaded_state,
     }
 
 
@@ -1502,6 +1513,280 @@ def _check_lua_ai_slop_patterns(content, raw_lines):
         for ln, ident, orig in exists_hits:
             report_lines.append(f"  - {ln} ({ident}): --{orig}")
     return "\n".join(report_lines)
+def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None, manifest_stem=""):
+    """Collects string literal constants and table fields (e.g. Addon.name = '...') across addon files."""
+    str_consts = {}
+    if manifest_stem:
+        str_consts["__MANIFEST_STEM__"] = manifest_stem
+    gt_set = set(all_global_tables or ())
+    rx_assign = re.compile(
+        r"""\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*["']([^"'\r\n]+)["']"""
+    )
+    rx_tbl_field = re.compile(
+        r"""\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']"""
+    )
+    for _, clean_lua in lua_texts_by_rel_path:
+        for m in rx_assign.finditer(clean_lua):
+            lhs, val = m.group(1), m.group(2)
+            str_consts[lhs] = val
+            if "." in lhs:
+                owner, member = lhs.split(".", 1)
+                if owner in gt_set or member.lower() in ("name", "addonname", "addon_name", "id"):
+                    str_consts.setdefault(member, val)
+        for gt in gt_set:
+            for tm in re.finditer(r"\b" + re.escape(gt) + r"\s*=\s*\{", clean_lua):
+                brace_start = tm.end() - 1
+                depth = 0
+                end_b = -1
+                for idx in range(brace_start, len(clean_lua)):
+                    ch = clean_lua[idx]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end_b = idx
+                            break
+                if end_b > brace_start:
+                    body = clean_lua[brace_start + 1:end_b]
+                    for fm in rx_tbl_field.finditer(body):
+                        k_name, v_str = fm.group(1), fm.group(2)
+                        str_consts[f"{gt}.{k_name}"] = v_str
+                        if k_name.lower() in ("name", "addonname", "addon_name", "id"):
+                            str_consts.setdefault(k_name, v_str)
+    return str_consts
+
+
+def _resolve_lua_string_expr(expr, str_consts):
+    """Resolves a string literal or known constant/table field expression to its string value."""
+    s = (expr or "").strip()
+    if not s:
+        return None
+    m_q = re.match(r"""^["']([^"']+)["']$""", s)
+    if m_q:
+        return m_q.group(1)
+    if s in str_consts:
+        return str_consts[s]
+    if "." in s:
+        member = s.rsplit(".", 1)[-1]
+        if member in str_consts:
+            return str_consts[member]
+    return None
+
+
+def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, manifest_stem=""):
+    """Collects all EVENT_ADD_ON_LOADED RegisterForEvent/UnregisterForEvent calls and functions addon-wide."""
+    str_consts = _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables, manifest_stem)
+    reg_rx = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:()]*\s*:\s*)?RegisterForEvent\s*\(")
+    unreg_rx = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:()]*\s*:\s*)?UnregisterForEvent\s*\(")
+    registers = []
+    unregisters = []
+    func_defs = {}
+
+    for rel_path, clean_lua in lua_texts_by_rel_path:
+        rel_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/")]
+        if any(p in ("lib", "libs", "libraries") for p in rel_parts):
+            continue
+        raw_lines = clean_lua.splitlines()
+
+        for fm in re.finditer(r"\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(", clean_lua):
+            full_fn = fm.group(1)
+            params, body = _extract_lua_function_body_from_offset(clean_lua, fm.start())
+            if ":" in full_fn and "self" not in params:
+                params = ["self"] + list(params)
+            fn_ln = clean_lua.count("\n", 0, fm.start()) + 1
+            func_defs[full_fn] = (params, body, rel_path, fn_ln)
+            func_defs[full_fn.split(".")[-1].split(":")[-1]] = (params, body, rel_path, fn_ln)
+
+        for m in reg_rx.finditer(clean_lua):
+            args_raw, _ = _extract_balanced_call_args(clean_lua, m.end() - 1)
+            if not args_raw:
+                continue
+            args = _split_top_level_lua_args(args_raw)
+            if len(args) < 3 or args.__getitem__(1).strip() != "EVENT_ADD_ON_LOADED":
+                continue
+            ns_expr = args.__getitem__(0).strip()
+            cb_expr = args.__getitem__(2).strip()
+            ln = clean_lua.count("\n", 0, m.start()) + 1
+            orig_ln = raw_lines.__getitem__(ln - 1).strip() if (ln - 1) < len(raw_lines) else ""
+            cb_inline = None
+            if cb_expr.startswith("function"):
+                fn_off = clean_lua.find("function", m.end() - 1)
+                if fn_off != -1:
+                    cb_inline = _extract_lua_function_body_from_offset(clean_lua, fn_off)
+            registers.append({
+                "file": rel_path,
+                "line": ln,
+                "ns_expr": ns_expr,
+                "ns_resolved": _resolve_lua_string_expr(ns_expr, str_consts),
+                "cb_expr": cb_expr,
+                "cb_inline": cb_inline,
+                "code": orig_ln,
+            })
+
+        for m in unreg_rx.finditer(clean_lua):
+            args_raw, _ = _extract_balanced_call_args(clean_lua, m.end() - 1)
+            if not args_raw:
+                continue
+            args = _split_top_level_lua_args(args_raw)
+            if len(args) < 2 or args.__getitem__(1).strip() != "EVENT_ADD_ON_LOADED":
+                continue
+            ns_expr = args.__getitem__(0).strip()
+            ln = clean_lua.count("\n", 0, m.start()) + 1
+            orig_ln = raw_lines.__getitem__(ln - 1).strip() if (ln - 1) < len(raw_lines) else ""
+            unregisters.append({
+                "file": rel_path,
+                "line": ln,
+                "ns_expr": ns_expr,
+                "ns_resolved": _resolve_lua_string_expr(ns_expr, str_consts),
+                "code": orig_ln,
+            })
+
+    return {
+        "registers": registers,
+        "unregisters": unregisters,
+        "func_defs": func_defs,
+        "str_consts": str_consts,
+        "manifest_stem": manifest_stem,
+    }
+
+
+def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, lua_issues):
+    """Validates EVENT_ADD_ON_LOADED Register/Unregister pairs, callback parameter 2, and case-sensitive addon name check."""
+    clean_code = strip_lua_comments_preserve_lines(content)
+    if "EVENT_ADD_ON_LOADED" not in clean_code:
+        return
+
+    norm_fn = file_name.replace("\\", "/")
+    rel_parts = [p.lower() for p in norm_fn.split("/")]
+    if any(p in ("lib", "libs", "libraries") for p in rel_parts):
+        return
+
+    expected_addon_name = ""
+    for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+        expected_addon_name = os.path.splitext(os.path.basename(mf)).__getitem__(0)
+        if expected_addon_name:
+            break
+    if not expected_addon_name and "/" in norm_fn:
+        expected_addon_name = next(iter(norm_fn.split("/")))
+
+    state = addon_ctx.get("addon_loaded_state")
+    if state is None:
+        state = _collect_addon_loaded_state(
+            [(norm_fn, clean_code)],
+            all_global_tables=addon_ctx.get("all_global_tables"),
+            manifest_stem=expected_addon_name,
+        )
+        addon_ctx["addon_loaded_state"] = state
+
+    registers = state.get("registers") or []
+    unregisters = state.get("unregisters") or []
+    func_defs = state.get("func_defs") or {}
+    str_consts = state.get("str_consts") or {}
+
+    file_regs = [r for r in registers if r.get("file") == norm_fn]
+    if not file_regs:
+        return
+
+    def _ns_matches(reg_item, unreg_item):
+        r_res = reg_item.get("ns_resolved")
+        u_res = unreg_item.get("ns_resolved")
+        if r_res is not None and u_res is not None:
+            return r_res == u_res
+        return reg_item.get("ns_expr") == unreg_item.get("ns_expr")
+
+    def _ns_label(item):
+        expr = item.get("ns_expr") or "?"
+        res = item.get("ns_resolved")
+        if res is not None and expr not in (f'"{res}"', f"'{res}'"):
+            return f"{expr} ('{res}')"
+        return expr
+
+    if not addon_ctx.get("_addon_loaded_pairs_checked"):
+        addon_ctx["_addon_loaded_pairs_checked"] = True
+        unmatched_regs = []
+        unmatched_unregs = list(unregisters)
+        for reg in registers:
+            match_idx = None
+            for idx_u, unreg in enumerate(unmatched_unregs):
+                if _ns_matches(reg, unreg):
+                    match_idx = idx_u
+                    break
+            if match_idx is not None:
+                unmatched_unregs.pop(match_idx)
+            else:
+                unmatched_regs.append(reg)
+
+        if unmatched_regs or unmatched_unregs:
+            pair_lines = []
+            for r in unmatched_regs:
+                r_short = r.get("file", "").split("/", 1).__getitem__(1) if "/" in r.get("file", "") else r.get("file", "")
+                pair_lines.append(f"Register [{r_short}:{r['line']}]: {_ns_label(r)}")
+            for u in unmatched_unregs:
+                u_short = u.get("file", "").split("/", 1).__getitem__(1) if "/" in u.get("file", "") else u.get("file", "")
+                pair_lines.append(f"Unregister [{u_short}:{u['line']}]: {_ns_label(u)}")
+            first_reg = next(iter(unmatched_regs), None) or next(iter(file_regs))
+            lua_issues.append(
+                f"Unregister EVENT_ADD_ON_LOADED does not match your register name (line {first_reg['line']}): ({' | '.join(pair_lines)})"
+            )
+
+    for reg in file_regs:
+        reg_ln = reg["line"]
+        orig_reg = raw_lines.__getitem__(reg_ln - 1).strip() if (reg_ln - 1) < len(raw_lines) else reg.get("code", "")
+        cb_params, cb_body = [], ""
+        if reg.get("cb_inline") is not None:
+            cb_params, cb_body = reg["cb_inline"]
+        else:
+            cb_key = reg.get("cb_expr", "")
+            if cb_key in func_defs:
+                cb_params, cb_body, _, _ = func_defs[cb_key]
+            else:
+                short_cb = cb_key.split(".")[-1].split(":")[-1]
+                if short_cb in func_defs:
+                    cb_params, cb_body, _, _ = func_defs[short_cb]
+
+        if not cb_params and not cb_body:
+            continue
+
+        if len(cb_params) < 2 or not cb_params.__getitem__(1) or cb_params.__getitem__(1) == "_":
+            lua_issues.append(
+                f"EVENT_ADD_ON_LOADED missing addonName parameter for comparison (line {reg_ln}): (-- {orig_reg})"
+            )
+            continue
+
+        addon_param = cb_params.__getitem__(1)
+        esc_p = re.escape(addon_param)
+        cmp_rx = re.compile(
+            rf"""(?:\b{esc_p}\b\s*(?:==|~=)\s*([^\s);,\]]+)|([^\s(;,]+)\s*(?:==|~=)\s*\b{esc_p}\b)"""
+        )
+        comparisons = [
+            (cm.group(1) or cm.group(2) or "").strip()
+            for cm in cmp_rx.finditer(cb_body)
+            if (cm.group(1) or cm.group(2) or "").strip()
+        ]
+
+        if not comparisons:
+            lua_issues.append(
+                f"EVENT_ADD_ON_LOADED addonName is not compared against your addon folder name (case-sensitive) (line {reg_ln}): (-- {orig_reg})"
+            )
+            continue
+
+        if expected_addon_name:
+            exact_ok = False
+            mismatch_found = None
+            for tok in comparisons:
+                resolved_cmp = _resolve_lua_string_expr(tok, str_consts)
+                if resolved_cmp is None or resolved_cmp == expected_addon_name:
+                    exact_ok = True
+                    break
+                mismatch_found = resolved_cmp
+            if not exact_ok and mismatch_found is not None:
+                lua_issues.append(
+                    f"EVENT_ADD_ON_LOADED check does not match your addon name (case-sensitive) (line {reg_ln}): "
+                    f"(-- {orig_reg} -- compared against '{mismatch_found}', expected '{expected_addon_name}')"
+                )
+
+
 def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
     """Flags deprecated ZO_SavedVars:NewCharacterNameSettings calls in favor of NewCharacterIdSettings."""
     pattern = re.compile(r'ZO_SavedVars\s*:\s*NewCharacterNameSettings\b')
@@ -1511,7 +1796,6 @@ def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
             lua_issues.append(
                 f"Deprecated SavedVars API at line {idx}: Use 'ZO_SavedVars:NewCharacterIdSettings' instead of 'NewCharacterNameSettings' (--{orig})."
             )
-
 
 def _build_line_local_scopes(code_only):
     """
@@ -1957,6 +2241,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
 
     move_to_table_hits = []
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
+    _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, lua_issues)
     _check_lua_event_filters(content, raw_lines, lua_issues)
     _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, addon_ctx, lua_issues)
     _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, move_to_table_hits=move_to_table_hits)

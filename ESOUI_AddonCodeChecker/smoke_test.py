@@ -1001,5 +1001,95 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+    def test_20_event_add_on_loaded_checks_and_pairing(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "HideFriendStatus")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "HideFriendStatus.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: HideFriendStatus\n## APIVersion: 101051\nHideFriendStatus.lua\n")
+
+            bad_lua = (
+                'local HideFriendStatus = { name = "HideFriendStatus" }\n'
+                'function HideFriendStatus.Init(event, addonName)\n'
+                '    HideFriendStatus.SuppressStatusMessages()\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent(HideFriendStatus.name, EVENT_ADD_ON_LOADED, HideFriendStatus.Init)\n'
+            )
+            with open(os.path.join(addon_dir, "HideFriendStatus.lua"), "w", encoding="utf-8") as lf:
+                lf.write(bad_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_bad = analyze_lua_file("HideFriendStatus/HideFriendStatus.lua", bad_lua, tmp_dir, ctx)
+
+            self.assertIn("Unregister EVENT_ADD_ON_LOADED does not match your register name", res_bad)
+            self.assertIn("EVENT_ADD_ON_LOADED addonName is not compared against your addon folder name (case-sensitive)", res_bad)
+
+            good_lua = (
+                'local HideFriendStatus = { name = "HideFriendStatus" }\n'
+                'HideFriendStatus.EM = GetEventManager()\n'
+                'function HideFriendStatus.Init(event, addonName)\n'
+                '    if addonName ~= HideFriendStatus.name then return end\n'
+                '    HideFriendStatus.EM:UnregisterForEvent(HideFriendStatus.name, EVENT_ADD_ON_LOADED)\n'
+                'end\n'
+                'HideFriendStatus.EM:RegisterForEvent(HideFriendStatus.name, EVENT_ADD_ON_LOADED, HideFriendStatus.Init)\n'
+            )
+            with open(os.path.join(addon_dir, "HideFriendStatus.lua"), "w", encoding="utf-8") as lf:
+                lf.write(good_lua)
+            ctx_good = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_good = analyze_lua_file("HideFriendStatus/HideFriendStatus.lua", good_lua, tmp_dir, ctx_good)
+
+            self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", res_good)
+            self.assertNotIn("EVENT_ADD_ON_LOADED addonName", res_good)
+            self.assertNotIn("EVENT_ADD_ON_LOADED check", res_good)
+            self.assertNotIn("EVENT_ADD_ON_LOADED missing", res_good)
+
+    def test_21_multi_drop_parsing_and_zip_before_txt_order(self):
+        import esoui_codecheck
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spaced_dir = os.path.join(tmp_dir, "My Addons")
+            os.makedirs(spaced_dir, exist_ok=True)
+            z1 = os.path.join(spaced_dir, "AddonOne.zip")
+            z2 = os.path.join(tmp_dir, "AddonTwo.zip")
+            t1 = os.path.join(spaced_dir, "batch_list.txt")
+            for fp in (z1, z2, t1):
+                with open(fp, "w", encoding="utf-8") as fh:
+                    fh.write("stub")
+
+            win_drop_str = f'"{t1}" "{z1}" {z2}'
+            parsed = esoui_codecheck._parse_multi_drop_paths(win_drop_str)
+            self.assertEqual(parsed, [t1, z1, z2])
+
+            comma_drop_str = f'{t1}, {z1}, {z2}'
+            self.assertEqual(esoui_codecheck._parse_multi_drop_paths(comma_drop_str), [t1, z1, z2])
+
+            single_with_spaces = f'"{z1}"'
+            self.assertEqual(esoui_codecheck._parse_multi_drop_paths(single_with_spaces), [])
+
+            execution_order = []
+            with patch.object(
+                esoui_codecheck, "handle_input", side_effect=lambda p, force_download=False: (p, os.path.basename(p))
+            ), patch.object(
+                esoui_codecheck, "process_addon", side_effect=lambda zp, zn, **kw: execution_order.append(("zip", zn))
+            ), patch.object(
+                esoui_codecheck, "_run_txt_batch_file", side_effect=lambda tp: execution_order.append(("txt", os.path.basename(tp)))
+            ), patch.object(esoui_codecheck, "print_multi_addon_summary"):
+                esoui_codecheck._process_multi_drop_targets(parsed)
+
+            self.assertEqual(
+                execution_order,
+                [("zip", "AddonOne.zip"), ("zip", "AddonTwo.zip"), ("txt", "batch_list.txt")],
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -944,6 +944,17 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 report_data.setdefault("non_unique_globals", []).append((rel_norm, line_no, var_name))
                 continue
 
+            addon_loaded_unreg_m = re.match(
+                r"^Unregister EVENT_ADD_ON_LOADED does not match your register name\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if addon_loaded_unreg_m:
+                line_no = addon_loaded_unreg_m.group(1).strip()
+                pairs_txt = addon_loaded_unreg_m.group(2).strip()
+                rule_hdr = "Unregister EVENT_ADD_ON_LOADED does not match your register name"
+                report_data["critical"][category][rule_hdr].append((rel_norm, line_no, pairs_txt))
+                continue
+
             if item_text.startswith("Multiple Global Addon Tables:"):
                 m_multi = re.search(r'\(([^()]+)\)\s*$', item_text)
                 tbl_detail = m_multi.group(1).strip() if m_multi else ""

@@ -8,6 +8,7 @@ CLI entry point and batch coordinator for static ESO addon checks and Ollama AI 
 import json
 import os
 import re
+import sys
 from datetime import datetime
 
 
@@ -72,6 +73,57 @@ def _save_cmd_history(history_state, history_path=CMD_HISTORY_FILE):
         pass
 
 
+def _parse_multi_drop_paths(raw_text):
+    """
+    Parses a line containing multiple drag-and-dropped or comma-separated file paths
+    (e.g. '"C:\\My Addons\\A.zip" "C:\\My Addons\\B.zip"' or 'A.zip, B.zip, list.txt').
+    Returns a list of valid existing file paths when >= 2 targets are detected, else [].
+    """
+    if not raw_text or os.path.exists(raw_text.strip('"').strip("'").strip()):
+        return []
+    tokens = []
+    if "," in raw_text or ";" in raw_text:
+        for part in re.split(r"[,;]+", raw_text):
+            tok = part.strip().strip('"').strip("'").strip()
+            if tok:
+                tokens.append(tok)
+    else:
+        for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'|(\S+)', raw_text):
+            tok = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+            if tok:
+                tokens.append(tok)
+    if len(tokens) < 2:
+        return []
+    if all(os.path.exists(tok) for tok in tokens):
+        return tokens
+    return []
+
+def _process_multi_drop_targets(paths, force_flag=False):
+    """
+    Processes multiple dropped files: checks all .zip archives first (with summary),
+    then processes any dropped .txt batch lists afterwards so a TXT abort cannot skip ZIPs.
+    """
+    zip_targets = [p for p in paths if not p.lower().endswith(".txt")]
+    txt_targets = [p for p in paths if p.lower().endswith(".txt")]
+    ordered = zip_targets + txt_targets
+    display_joined = ", ".join(os.path.basename(p) for p in ordered)
+    print(f"{C.CYAN}-> Queued multi-drop targets ({len(ordered)}):{C.RESET} {C.WHITE}{display_joined}{C.RESET}")
+
+    t0 = datetime.now()
+    drop_summaries = []
+    for idx, z_item in enumerate(zip_targets, 1):
+        print(f"\n[Dropped File {idx}/{len(zip_targets)}] Checking: {os.path.basename(z_item)}")
+        zip_path, zip_name = handle_input(z_item, force_download=force_flag)
+        if zip_path and zip_name:
+            process_addon(zip_path, zip_name, summary_collector=drop_summaries)
+    if zip_targets:
+        print_multi_addon_summary(drop_summaries)
+        print(f"=== Dropped ZIP batch finished in {C.MAGENTA}{(datetime.now() - t0).total_seconds():.2f} seconds{C.RESET}. ===\n")
+
+    for t_item in txt_targets:
+        _run_txt_batch_file(t_item)
+
+
 def _resolve_repeat_command(clean_cmd, history_state):
     """
     Resolves 'repeat', 'repeat dl', or 'repeat search' against stored CLI command history.
@@ -116,17 +168,26 @@ def main_cli():
     bp_state_lbl = f"{C.GREEN}ON{C.RESET}" if is_bp_multi_globals_enabled() else f"{C.YELLOW}OFF{C.RESET}"
     print(f"  - {C.WHITE}List multiple used globals{C.RESET}: bpglobal (toggle report section, default: {bp_state_lbl})")
     print(f"  - {C.WHITE}Cleanup{C.RESET}         : clear cache | clear cache addons | clear zips [YYMMDD] | clear reports [YYMMDD]")
-    print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop a .zip archive or a .txt batch list\n")
+    print(f"  - {C.WHITE}Local File / TXT{C.RESET}: Drag & drop one or multiple .zip / .txt files\n")
     os.makedirs(BASE_FOLDER, exist_ok=True)
 
     # Load persisted 'repeat' command targets across terminal sessions
     cmd_history = _load_cmd_history()
 
+    cli_args = [a.strip() for a in sys.argv[1:] if a.strip() and not a.strip().startswith("--")]
+    queued_cli_inputs = []
+    if len(cli_args) >= 2 and all(os.path.exists(a.strip('"').strip("'")) for a in cli_args):
+        queued_cli_inputs.append(", ".join(f'"{a.strip(chr(34)).strip(chr(39))}"' for a in cli_args))
+    elif len(cli_args) == 1:
+        queued_cli_inputs.append(cli_args.__getitem__(0))
 
     while True:
-        raw = read_cli_input_with_esc(
-            f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'repeat ...', 'bpglobal', 'clear ...', .zip/.txt, or ESC/'exit'): "
-        ).strip()
+        if queued_cli_inputs:
+            raw = queued_cli_inputs.pop(0).strip()
+        else:
+            raw = read_cli_input_with_esc(
+                f"Input ([force] URL, 'dl <id>', 'last <1..{ESOUI_LATEST_MAX_ITEMS}>', 'search ...', 'repeat ...', 'bpglobal', 'clear ...', .zip/.txt, or ESC/'exit'): "
+            ).strip()
         if raw == "__ESC__" or raw.lower() == "exit":
             print("Exiting. Have a great day!")
             break
@@ -208,7 +269,13 @@ def main_cli():
                 print_multi_addon_summary(dl_summaries)
             continue
 
-        if os.path.exists(clean) and clean.lower().endswith(".txt"):
+        multi_drop_paths = _parse_multi_drop_paths(raw)
+        if multi_drop_paths:
+            normalized_cmd = ", ".join(f'"{p}"' for p in multi_drop_paths)
+            cmd_history["last_any"] = f"force {normalized_cmd}" if force_flag else normalized_cmd
+            _save_cmd_history(cmd_history)
+            _process_multi_drop_targets(multi_drop_paths, force_flag=force_flag)
+        elif os.path.exists(clean) and clean.lower().endswith(".txt"):
             cmd_history["last_any"] = executed_full_cmd
             _save_cmd_history(cmd_history)
             _run_txt_batch_file(clean)
@@ -217,8 +284,7 @@ def main_cli():
             if zip_path and zip_name:
                 cmd_history["last_any"] = executed_full_cmd
                 _save_cmd_history(cmd_history)
-                process_addon(zip_path, zip_name)
-    
+                process_addon(zip_path, zip_name) 
 
 
 def _run_txt_batch_file(txt_path):
