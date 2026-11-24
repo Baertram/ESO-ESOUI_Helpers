@@ -215,6 +215,10 @@ def main_cli():
                 print(f"{C.RED}-> Error: Missing target after 'force' (e.g. 'force dl 5026' or 'force last 1-5').{C.RESET}")
                 continue
 
+        raw_unstripped = raw
+        if force_flag and re.match(r'^force(?:\s+|$)', raw_unstripped, flags=re.IGNORECASE):
+            raw_unstripped = raw_unstripped[5:].strip()
+
         # Resolve 'repeat', 'repeat dl', or 'repeat search' to its stored command string
         if re.match(r'^repeat(?:\s+.*)?$', clean, flags=re.IGNORECASE) and not os.path.exists(clean):
             repeated_cmd, rep_err = _resolve_repeat_command(clean, cmd_history)
@@ -222,10 +226,12 @@ def main_cli():
                 print(f"{C.RED}-> Error: {rep_err}{C.RESET}")
                 continue
             clean = repeated_cmd
+            raw_unstripped = repeated_cmd
             if re.match(r'^force(?:\s+|$)', clean, flags=re.IGNORECASE):
                 force_flag = True
-                clean = clean[5:].strip().strip('"').strip("'").strip()
-            display_rep = f"force {clean}" if force_flag else clean
+                raw_unstripped = clean[5:].strip()
+                clean = raw_unstripped.strip('"').strip("'").strip()
+            display_rep = f"force {raw_unstripped}" if force_flag else raw_unstripped
             print(f"{C.CYAN}-> Repeating command:{C.RESET} {C.WHITE}{display_rep}{C.RESET}")
 
         executed_full_cmd = f"force {clean}" if force_flag else clean
@@ -269,7 +275,7 @@ def main_cli():
                 print_multi_addon_summary(dl_summaries)
             continue
 
-        multi_drop_paths = _parse_multi_drop_paths(raw)
+        multi_drop_paths = _parse_multi_drop_paths(raw_unstripped)
         if multi_drop_paths:
             normalized_cmd = ", ".join(f'"{p}"' for p in multi_drop_paths)
             cmd_history["last_any"] = f"force {normalized_cmd}" if force_flag else normalized_cmd

@@ -1138,14 +1138,47 @@ def collect_addon_context(extract_dir):
     }
 
 
+def _extract_multiline_local_decls(code_only):
+    """Extracts (end_line_idx, [var_names]) for single-line, inline, and multi-line 'local a,\\n b = ...' declarations."""
+    lines = code_only.splitlines()
+    results = []
+    idx = 0
+    total = len(lines)
+    start_rx = re.compile(r'\blocal\s+(?!function\b)(.+)$')
+    while idx < total:
+        m = start_rx.search(lines.__getitem__(idx))
+        if not m:
+            idx += 1
+            continue
+        collected_parts = []
+        cur_idx = idx
+        first_rhs = m.group(1)
+        while cur_idx < total:
+            seg = first_rhs if cur_idx == idx else lines.__getitem__(cur_idx)
+            if "=" in seg and not re.search(r'(?:==|~=)', seg):
+                lhs_part = seg.split("=", 1).__getitem__(0)
+                collected_parts.append(lhs_part)
+                break
+            collected_parts.append(seg)
+            if not seg.rstrip().endswith(","):
+                break
+            cur_idx += 1
+        joined_lhs = " ".join(collected_parts)
+        var_names = [
+            tok.strip()
+            for tok in joined_lhs.split(",")
+            if re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', tok.strip()) and tok.strip() != "function"
+        ]
+        if var_names:
+            results.append((cur_idx, var_names))
+        idx = cur_idx + 1
+    return results
+
 def _collect_lua_local_identifiers(code_only):
     """Collects local variables, function parameters, and loop variables in a Lua file."""
     file_locals = set(re.findall(r'\blocal\s+function\s+([A-Za-z_][A-Za-z0-9_]*)', code_only))
-    for decl in re.findall(r'\blocal\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)', code_only):
-        for name in decl.split(","):
-            clean_n = name.strip()
-            if clean_n and clean_n != "function":
-                file_locals.add(clean_n)
+    for _, var_names in _extract_multiline_local_decls(code_only):
+        file_locals.update(var_names)
     for param_list in re.findall(r'\bfunction(?:\s+[A-Za-z_][A-Za-z0-9_.:]*)?\s*\(([^)]*)\)', code_only):
         for param in param_list.split(","):
             clean_p = param.strip()
@@ -1485,20 +1518,43 @@ def _check_lua_ai_slop_patterns(content, raw_lines):
     pcall_hits = []
     exists_hits = []
     pcall_pat = re.compile(r'(?<![A-Za-z0-9_.:])\bpcall\s*\(')
-    if_exists_pat = re.compile(
-        r'\b(?:if|elseif)\s+(?:type\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*(?:==|~=)\s*["\'](?:nil|function|table)["\']|([A-Za-z_][A-Za-z0-9_]*)\s*(?:~= nil)?)\s*then\b'
+    if_cond_pat = re.compile(r'\b(?:if|elseif)\b(.*?)\bthen\b')
+    atom_pat = re.compile(
+        r'^(?:type\s*\(\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*\)\s*(?:==|~=)\s*["\'](?:nil|function|table)["\']|([A-Za-z_][A-Za-z0-9_.:]*)(?:\s*~= nil)?)$'
     )
+
+    def _is_documented_eso_global(root_sym):
+        if not root_sym or len(root_sym) < 3 or root_sym in file_locals or root_sym in LUA_KEYWORDS:
+            return False
+        if not (root_sym.isupper() or root_sym.startswith("ZO_")):
+            return False
+        return root_sym in ESOUI_RAM_DICTIONARY or root_sym in ESOUI_UNDOCUMENTED_SET
 
     for idx, line in enumerate(lines, 1):
         orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
         for _ in pcall_pat.finditer(line):
             pcall_hits.append((idx, orig))
-        for m in if_exists_pat.finditer(line):
-            ident = m.group(1) or m.group(2)
-            if not ident or len(ident) < 3 or ident in file_locals or not ident.isupper():
+        for cm in if_cond_pat.finditer(line):
+            cond_txt = cm.group(1).strip()
+            if not cond_txt:
                 continue
-            if ident in ESOUI_RAM_DICTIONARY or ident in ESOUI_UNDOCUMENTED_SET:
-                exists_hits.append((idx, ident, orig))
+            parts = [p.strip() for p in re.split(r'\band\b', cond_txt) if p.strip()]
+            matched_exprs = []
+            all_parts_valid = True
+            for part in parts:
+                am = atom_pat.match(part)
+                if not am:
+                    all_parts_valid = False
+                    break
+                expr = (am.group(1) or am.group(2) or "").strip()
+                root_ident = expr.split(".").__getitem__(0).split(":").__getitem__(0)
+                if not _is_documented_eso_global(root_ident):
+                    all_parts_valid = False
+                    break
+                matched_exprs.append(expr)
+            if all_parts_valid and matched_exprs:
+                display_ident = matched_exprs[-1]
+                exists_hits.append((idx, display_ident, orig))
 
     if not pcall_hits and not exists_hits:
         return ""
@@ -1702,7 +1758,16 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
             return f"{expr} ('{res}')"
         return expr
 
-    if not addon_ctx.get("_addon_loaded_pairs_checked"):
+    def _rel_display_path(raw_f):
+        norm_p = (raw_f or "").replace("\\", "/")
+        return "/" + norm_p.split("/", 1).__getitem__(1) if "/" in norm_p else "/" + norm_p
+
+    if not unregisters:
+        for reg in file_regs:
+            lua_issues.append(
+                f"Unregister EVENT_ADD_ON_LOADED is missing (line {reg['line']}): ({reg['line']}: {_ns_label(reg)})"
+            )
+    elif not addon_ctx.get("_addon_loaded_pairs_checked"):
         addon_ctx["_addon_loaded_pairs_checked"] = True
         unmatched_regs = []
         unmatched_unregs = list(unregisters)
@@ -1718,17 +1783,25 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
                 unmatched_regs.append(reg)
 
         if unmatched_regs or unmatched_unregs:
-            pair_lines = []
-            for r in unmatched_regs:
-                r_short = r.get("file", "").split("/", 1).__getitem__(1) if "/" in r.get("file", "") else r.get("file", "")
-                pair_lines.append(f"Register [{r_short}:{r['line']}]: {_ns_label(r)}")
-            for u in unmatched_unregs:
-                u_short = u.get("file", "").split("/", 1).__getitem__(1) if "/" in u.get("file", "") else u.get("file", "")
-                pair_lines.append(f"Unregister [{u_short}:{u['line']}]: {_ns_label(u)}")
-            first_reg = next(iter(unmatched_regs), None) or next(iter(file_regs))
-            lua_issues.append(
-                f"Unregister EVENT_ADD_ON_LOADED does not match your register name (line {first_reg['line']}): ({' | '.join(pair_lines)})"
-            )
+            pair_count = max(len(unmatched_regs), len(unmatched_unregs))
+            for idx_p in range(pair_count):
+                r_item = unmatched_regs.__getitem__(idx_p) if idx_p < len(unmatched_regs) else None
+                u_item = unmatched_unregs.__getitem__(idx_p) if idx_p < len(unmatched_unregs) else None
+                if r_item and u_item:
+                    r_rel = _rel_display_path(r_item.get("file"))
+                    u_rel = _rel_display_path(u_item.get("file"))
+                    u_prefix = f"{u_rel} " if u_rel != r_rel else ""
+                    detail = f"{r_item['line']}: {_ns_label(r_item)} ~= {u_prefix}{u_item['line']}: {_ns_label(u_item)}"
+                    anchor_ln = r_item["line"]
+                elif r_item:
+                    detail = f"{r_item['line']}: {_ns_label(r_item)}"
+                    anchor_ln = r_item["line"]
+                else:
+                    detail = f"{u_item['line']}: {_ns_label(u_item)}"
+                    anchor_ln = u_item["line"]
+                lua_issues.append(
+                    f"Unregister EVENT_ADD_ON_LOADED does not match your register name (line {anchor_ln}): ({detail})"
+                )
 
     for reg in file_regs:
         reg_ln = reg["line"]
@@ -1767,7 +1840,7 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
 
         if not comparisons:
             lua_issues.append(
-                f"EVENT_ADD_ON_LOADED addonName is not compared against your addon folder name (case-sensitive) (line {reg_ln}): (-- {orig_reg})"
+                f"EVENT_ADD_ON_LOADED addonName not compared against addon folder name (case-sensitive) (line {reg_ln}): (-- {orig_reg})"
             )
             continue
 
@@ -1785,6 +1858,45 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
                     f"EVENT_ADD_ON_LOADED check does not match your addon name (case-sensitive) (line {reg_ln}): "
                     f"(-- {orig_reg} -- compared against '{mismatch_found}', expected '{expected_addon_name}')"
                 )
+
+
+def _check_lua_inventory_context_menu_hook(file_name, content, raw_lines, lua_issues):
+    """Flags manual hooking or overwriting of ZO_InventorySlot_ShowContextMenu instead of LibCustomMenu:RegisterContextMenu."""
+    base_name = os.path.basename((file_name or "").replace("\\", "/")).lower()
+    if base_name == "libcustommenu.lua":
+        return
+
+    clean_code = strip_lua_comments_preserve_lines(content)
+    if "ZO_InventorySlot_ShowContextMenu" not in clean_code:
+        return
+
+    hook_call_rx = re.compile(r"\b(?:ZO_PreHook|ZO_PostHook|SecurePostHook|ZO_PreHookHandler|ZO_PostHookHandler)\s*\(")
+    func_def_rx = re.compile(r"\bfunction\s+(?:_G\s*\.\s*)?ZO_InventorySlot_ShowContextMenu\s*\(")
+    assign_rx = re.compile(
+        r"""(?:(?<![A-Za-z0-9_.:])\bZO_InventorySlot_ShowContextMenu\b|\b_G\s*\[\s*["']ZO_InventorySlot_ShowContextMenu["']\s*\])\s*=(?!=)"""
+    )
+
+    hit_lines = set()
+    for m in hook_call_rx.finditer(clean_code):
+        args_raw, _ = _extract_balanced_call_args(clean_code, m.end() - 1)
+        if not args_raw:
+            continue
+        args = _split_top_level_lua_args(args_raw)
+        target_args = args[:2]
+        if any(re.search(r"""(?:^|["'.\s])ZO_InventorySlot_ShowContextMenu(?:$|["'\s])""", a.strip()) for a in target_args):
+            ln = clean_code.count("\n", 0, m.start()) + 1
+            hit_lines.add(ln)
+
+    for rx in (func_def_rx, assign_rx):
+        for m in rx.finditer(clean_code):
+            ln = clean_code.count("\n", 0, m.start()) + 1
+            hit_lines.add(ln)
+
+    for ln in sorted(hit_lines):
+        orig = raw_lines.__getitem__(ln - 1).strip() if (ln - 1) < len(raw_lines) else ""
+        lua_issues.append(
+            f"Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu (line {ln}): (-- {orig})"
+        )
 
 
 def _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues):
@@ -1807,7 +1919,11 @@ def _build_line_local_scopes(code_only):
     line_scopes = []
     block_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b|\b(end|until)\b')
 
-    for line in lines:
+    multiline_decls_by_end = defaultdict(list)
+    for end_i, v_list in _extract_multiline_local_decls(code_only):
+        multiline_decls_by_end[end_i].append((end_i, v_list))
+
+    for line_idx, line in enumerate(lines):
         stripped = line.strip()
 
         if stripped.startswith("local function "):
@@ -1826,15 +1942,10 @@ def _build_line_local_scopes(code_only):
 
         line_scopes.append(set().union(*active_scopes))
 
-        for loc_m in re.finditer(
-            r'\blocal\s+(?!function\b)([A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)',
-            stripped,
-        ):
-            for v in loc_m.group(1).split(","):
-                clean_v = v.strip()
-                if clean_v:
-                    active_scopes[-1].add(clean_v)
-                    line_scopes[-1].add(clean_v)
+        for decl_end_idx, decl_vars in multiline_decls_by_end.get(line_idx, ()):
+            for clean_v in decl_vars:
+                active_scopes[-1].add(clean_v)
+                line_scopes[-1].add(clean_v)
         for bm in block_rx.finditer(line):
             b_open, b_close = bm.groups()
             if b_open in ("if", "while", "repeat", "do"):
@@ -2241,6 +2352,7 @@ def analyze_lua_file(file_name, content, active_extract_dir, addon_ctx):
 
     move_to_table_hits = []
     _check_lua_deprecated_savedvars(comment_free_lua, raw_lines, lua_issues)
+    _check_lua_inventory_context_menu_hook(file_name, content, raw_lines, lua_issues)
     _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, lua_issues)
     _check_lua_event_filters(content, raw_lines, lua_issues)
     _check_lua_libgroupbroadcast_ids(file_name, content, active_extract_dir, addon_ctx, lua_issues)

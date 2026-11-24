@@ -1027,8 +1027,52 @@ class TestEsouiModularSmoke(unittest.TestCase):
             ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
                 res_bad = analyze_lua_file("HideFriendStatus/HideFriendStatus.lua", bad_lua, tmp_dir, ctx)
 
-            self.assertIn("Unregister EVENT_ADD_ON_LOADED does not match your register name", res_bad)
-            self.assertIn("EVENT_ADD_ON_LOADED addonName is not compared against your addon folder name (case-sensitive)", res_bad)
+            self.assertIn("Unregister EVENT_ADD_ON_LOADED is missing", res_bad)
+            self.assertIn("EVENT_ADD_ON_LOADED addonName not compared against addon folder name (case-sensitive)", res_bad)
+
+            mismatch_lua = (
+                'local HideFriendStatus = { name = "HideFriendStatus" }\n'
+                'function HideFriendStatus.Init(event, addonName)\n'
+                '    if addonName ~= HideFriendStatus.name then return end\n'
+                '    EVENT_MANAGER:UnregisterForEvent("WrongNamespace", EVENT_ADD_ON_LOADED)\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent(HideFriendStatus.name, EVENT_ADD_ON_LOADED, HideFriendStatus.Init)\n'
+            )
+            with open(os.path.join(addon_dir, "HideFriendStatus.lua"), "w", encoding="utf-8") as lf:
+                lf.write(mismatch_lua)
+            ctx_mm = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_mm = analyze_lua_file("HideFriendStatus/HideFriendStatus.lua", mismatch_lua, tmp_dir, ctx_mm)
+            self.assertIn("Unregister EVENT_ADD_ON_LOADED does not match your register name", res_mm)
+
+            slop_lua = (
+                "if EVENT_MANAGER then end\n"
+                "if ZO_ChatSystem_GetEventHandlers then end\n"
+                "if ZO_NotificationManager then end\n"
+                "if CHAT_ROUTER and CHAT_ROUTER.FormatAndAddChatMessage then end\n"
+                "if ZO_ChatSystem and ZO_ChatSystem.AddMessageToWindow then end\n"
+            )
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch.dict(
+                esoui_ram_index.ESOUI_RAM_DICTIONARY,
+                {
+                    "EVENT_MANAGER": "stub",
+                    "ZO_ChatSystem_GetEventHandlers": "stub",
+                    "ZO_NotificationManager": "stub",
+                    "CHAT_ROUTER": "stub",
+                    "ZO_ChatSystem": "stub",
+                },
+                clear=False,
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_slop = analyze_lua_file("HideFriendStatus/HideFriendStatus.lua", slop_lua, tmp_dir, ctx)
+            self.assertIn("1 (EVENT_MANAGER)", res_slop)
+            self.assertIn("2 (ZO_ChatSystem_GetEventHandlers)", res_slop)
+            self.assertIn("3 (ZO_NotificationManager)", res_slop)
+            self.assertIn("4 (CHAT_ROUTER.FormatAndAddChatMessage)", res_slop)
+            self.assertIn("5 (ZO_ChatSystem.AddMessageToWindow)", res_slop)
 
             good_lua = (
                 'local HideFriendStatus = { name = "HideFriendStatus" }\n'
@@ -1089,6 +1133,111 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 execution_order,
                 [("zip", "AddonOne.zip"), ("zip", "AddonTwo.zip"), ("txt", "batch_list.txt")],
             )
+
+
+    def test_22_inventory_slot_show_context_menu_hook_and_override(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _parse_findings_into_report_data, _render_final_bbcode_report
+        from src.esoui_lua_analyzer import analyze_lua_file
+
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": {"MyInvAddon"},
+            "dynamic_globals": set(),
+            "saved_variables": set(),
+            "root_addon_manifests": ["MyInvAddon.txt"],
+            "root_txt_manifests": [],
+        }
+
+        bad_lua = (
+            'ZO_PreHook("ZO_InventorySlot_ShowContextMenu", function(invSlot) end)\n'
+            'local origShow = ZO_InventorySlot_ShowContextMenu\n'
+            'ZO_InventorySlot_ShowContextMenu = function(invSlot)\n'
+            '    origShow(invSlot)\n'
+            'end\n'
+        )
+        safe_call_lua = (
+            'local function OpenMenu(slot)\n'
+            '    ZO_InventorySlot_ShowContextMenu(slot)\n'
+            'end\n'
+        )
+
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+        ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+            res_bad = analyze_lua_file("MyInvAddon/ContextMenu.lua", bad_lua, ".", ctx)
+            res_lcm = analyze_lua_file("MyInvAddon/Libs/LibCustomMenu/LibCustomMenu.lua", bad_lua, ".", ctx)
+            res_safe = analyze_lua_file("MyInvAddon/SafeCall.lua", safe_call_lua, ".", ctx)
+
+        self.assertIn("Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu (line 1)", res_bad)
+        self.assertIn("Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu (line 3)", res_bad)
+        self.assertNotIn("Inventory Context Menu Hook", res_lcm)
+        self.assertNotIn("Inventory Context Menu Hook", res_safe)
+
+        report_data = {
+            "zip_all_entries": ["MyInvAddon/", "MyInvAddon/MyInvAddon.txt", "MyInvAddon/ContextMenu.lua"],
+            "zip_flagged_paths": set(),
+            "zip_manifest_paths": {"MyInvAddon/MyInvAddon.txt"},
+            "zip_tree_bbcode": "",
+            "zip_violations": [],
+            "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+            "best_practices": defaultdict(list),
+        }
+        _parse_findings_into_report_data("MyInvAddon/ContextMenu.lua", "lua", res_bad, report_data)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+            tmp_rep = tf.name
+        try:
+            _render_final_bbcode_report(tmp_rep, "MyInvAddon.zip", "2026-11-24 12:00:00 AM", report_data)
+            with open(tmp_rep, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+            self.assertIn("[u]Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu[/u]", rendered)
+            self.assertIn(
+                '[*] \\ContextMenu.lua [spoiler][SIZE="2"]1: ZO_PreHook("ZO_InventorySlot_ShowContextMenu", function(invSlot) end)\n'
+                '3: ZO_InventorySlot_ShowContextMenu = function(invSlot)[/SIZE][/spoiler]',
+                rendered,
+            )
+        finally:
+            if os.path.exists(tmp_rep):
+                os.remove(tmp_rep)
+
+
+    def test_23_multiline_local_declaration_not_flagged_as_global(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file
+
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": {"MyTradeAddon"},
+            "dynamic_globals": set(),
+            "saved_variables": set(),
+            "root_addon_manifests": ["MyTradeAddon.txt"],
+            "root_txt_manifests": [],
+        }
+        lua_code = (
+            "local function UpdateRow(rowControl)\n"
+            "    local profitMarginControl,\n"
+            "        averagePricePerUnitControl,\n"
+            "        averagePriceControl,\n"
+            "        purchasePricePerUnit,\n"
+            "        averagePrice,\n"
+            "        averagePricePerUnit = GetControlsForSearchResults(rowControl)\n"
+            "    return averagePricePerUnit\n"
+            "end\n"
+        )
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+        ), patch.dict(
+            esoui_ram_index.ESOUI_RAM_DICTIONARY,
+            {"GetControlsForSearchResults": "stub"},
+            clear=False,
+        ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+            res = analyze_lua_file("MyTradeAddon/Search.lua", lua_code, ".", ctx)
+
+        self.assertNotIn("averagePricePerUnit", res)
+        self.assertIn("[STATUS] PASS", res)
 
 
 if __name__ == "__main__":

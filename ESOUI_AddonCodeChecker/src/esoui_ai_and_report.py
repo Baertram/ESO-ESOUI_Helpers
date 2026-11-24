@@ -945,14 +945,25 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 continue
 
             addon_loaded_unreg_m = re.match(
-                r"^Unregister EVENT_ADD_ON_LOADED does not match your register name\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                r"^(Unregister EVENT_ADD_ON_LOADED (?:is missing|does not match your register name))\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
                 item_text,
             )
             if addon_loaded_unreg_m:
-                line_no = addon_loaded_unreg_m.group(1).strip()
-                pairs_txt = addon_loaded_unreg_m.group(2).strip()
-                rule_hdr = "Unregister EVENT_ADD_ON_LOADED does not match your register name"
-                report_data["critical"][category][rule_hdr].append((rel_norm, line_no, pairs_txt))
+                rule_hdr = addon_loaded_unreg_m.group(1).strip()
+                pairs_txt = addon_loaded_unreg_m.group(3).strip()
+                report_data["critical"][category][rule_hdr].append((rel_norm, "", pairs_txt))
+                continue
+
+            inv_ctx_hook_m = re.match(
+                r"^Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if inv_ctx_hook_m:
+                line_no = inv_ctx_hook_m.group(1).strip()
+                raw_c = inv_ctx_hook_m.group(2).strip()
+                code_snip = re.sub(r"^--\s*", "", raw_c)
+                rule_hdr = "Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu"
+                report_data["critical"][category][rule_hdr].append((rel_norm, line_no, code_snip))
                 continue
 
             if item_text.startswith("Multiple Global Addon Tables:"):
@@ -1370,11 +1381,47 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
                             f'{lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
                         )
 
-                    for f_path, ln_no, code_txt in regular_entries:
-                        short_fp = _strip_addon_root_prefix(f_path)
-                        loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
-                        spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
-                        out.append(f"{lb}*{rb} {loc}{spoiler_part}")
+                    if rule_title == "Inventory Context Menu Hook, instead of LibCustomMenu:RegisterContextMenu":
+                        by_file_ctx = defaultdict(list)
+                        file_ctx_order = []
+                        for f_path, ln_no, code_txt in regular_entries:
+                            short_fp = _strip_addon_root_prefix(f_path)
+                            if short_fp not in by_file_ctx:
+                                file_ctx_order.append(short_fp)
+                            entry_str = f"{ln_no}: {code_txt}".strip() if ln_no else code_txt
+                            if entry_str and entry_str not in by_file_ctx[short_fp]:
+                                by_file_ctx[short_fp].append(entry_str)
+                        for short_fp in file_ctx_order:
+                            spoiler_body = "\n".join(by_file_ctx[short_fp])
+                            spoiler_part = (
+                                f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{spoiler_body}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                                if spoiler_body
+                                else ""
+                            )
+                            out.append(f"{lb}*{rb} {short_fp}{spoiler_part}")
+                    elif rule_title == "EVENT_ADD_ON_LOADED addonName not compared against addon folder name (case-sensitive)":
+                        by_file_cmp = defaultdict(list)
+                        file_cmp_order = []
+                        for f_path, ln_no, _ in regular_entries:
+                            short_fp = _strip_addon_root_prefix(f_path)
+                            if short_fp not in by_file_cmp:
+                                file_cmp_order.append(short_fp)
+                            if ln_no and ln_no not in by_file_cmp[short_fp]:
+                                by_file_cmp[short_fp].append(ln_no)
+                        for short_fp in file_cmp_order:
+                            lines_joined = ", ".join(by_file_cmp[short_fp])
+                            spoiler_part = (
+                                f' {lb}spoiler{rb}{lb}SIZE="2"{rb}Lines: {lines_joined}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                                if lines_joined
+                                else ""
+                            )
+                            out.append(f"{lb}*{rb} {short_fp}{spoiler_part}")
+                    else:
+                        for f_path, ln_no, code_txt in regular_entries:
+                            short_fp = _strip_addon_root_prefix(f_path)
+                            loc = f"{short_fp}:{ln_no}" if ln_no else short_fp
+                            spoiler_part = f' {lb}spoiler{rb}{lb}SIZE="2"{rb}{code_txt}{lb}/SIZE{rb}{lb}/spoiler{rb}' if code_txt else ""
+                            out.append(f"{lb}*{rb} {loc}{spoiler_part}")
                 out.append(f"{lb}/list{rb}")
             if has_cat_lgb:
                 out.append(f"{lb}u{rb}LibGroupBroadcast Protocoll/Event conflict{lb}/u{rb}")
@@ -1831,9 +1878,10 @@ def process_addon(
     BATCH_LEAK_TRACKER.clear()
     BATCH_BEST_PRACTICE_TRACKER.clear()
 
-    print(f"{C.CYAN}-------------------------------------------------------------------{C.RESET}")
+    osc_mark_start = "\033]133;A\033\\" if os.name == "nt" else ""
+    print(f"{osc_mark_start}{C.CYAN}-------------------------------------------------------------------{C.RESET}")
     clickable_zip_start = format_zip_display_link(zip_path, color=C.WHITE)
-    print(f"{C.CYAN}{C.BOLD}  ADDON START: {clickable_zip_start}")
+    print(f"{C.CYAN}{C.BOLD}  ADDON START: {clickable_zip_start} {C.RESET}{C.CYAN}(Jump marks: Ctrl+Alt+Up/Down){C.RESET}")
 
     os.makedirs(EXTRACT_FOLDER, exist_ok=True)
     now = datetime.now()
@@ -2042,7 +2090,8 @@ def process_addon(
         shutil.rmtree(EXTRACT_FOLDER)
     addon_duration = (datetime.now() - addon_start_time).total_seconds()
     clickable_zip_end = format_zip_display_link(zip_path, color=C.WHITE)
+    osc_mark_end = "\033]133;D\033\\" if os.name == "nt" else ""
     print(f"\n{C.CYAN}[4/4] Report saved to:{C.RESET} {format_report_display_link(current_report_file)}{status_badge}")
-    print(f"{C.CYAN}{C.BOLD}  ADDON END:   {clickable_zip_end}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
+    print(f"{osc_mark_end}{C.CYAN}{C.BOLD}  ADDON END:   {clickable_zip_end}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
     print(f"{C.CYAN}{C.BOLD}=================================================================={C.RESET}\n")
     return summary_entry
