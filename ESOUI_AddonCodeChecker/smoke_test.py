@@ -1240,5 +1240,69 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertIn("[STATUS] PASS", res)
 
 
+    def test_24_multiple_global_addon_tables_subclass_and_arbitrary_rhs(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "ArkadiusTradeTools")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "ArkadiusTradeTools.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: ArkadiusTradeTools\n## SavedVariables: ArkadiusTradeToolsSV\nTemplates.lua\n")
+
+            tpl_src = (
+                "ArkadiusTradeTools = {}\n"
+                "ArkadiusTradeToolsSV = ArkadiusTradeToolsSV or {}\n"
+                "ArkadiusTradeToolsObjectPool = ZO_Object:Subclass()\n"
+                "ArkadiusTradeToolsToggleButton = {}\n"
+                "ArkadiusTradeToolsSortFilterList = ZO_SortFilterList:Subclass()\n"
+                "ArkadiusTradeToolsSlider = ZO_InitializingObject:Subclass()\n"
+                "ArkadiusTradeToolsFilterBar = {}\n"
+            )
+            with open(os.path.join(addon_dir, "Templates.lua"), "w", encoding="utf-8") as lf:
+                lf.write(tpl_src)
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                ctx = collect_addon_context(tmp_dir)
+                self.assertEqual(
+                    ctx.get("all_global_tables"),
+                    {
+                        "ArkadiusTradeTools",
+                        "ArkadiusTradeToolsObjectPool",
+                        "ArkadiusTradeToolsToggleButton",
+                        "ArkadiusTradeToolsSortFilterList",
+                        "ArkadiusTradeToolsSlider",
+                        "ArkadiusTradeToolsFilterBar",
+                    },
+                )
+                self.assertNotIn("ArkadiusTradeToolsSV", ctx.get("all_global_tables"))
+                res = analyze_lua_file("ArkadiusTradeTools/Templates.lua", tpl_src, tmp_dir, ctx)
+
+            self.assertIn("Multiple Global Addon Tables: Found 6 global tables across the addon", res)
+
+
+    def test_25_local_assignment_with_inequality_operator_on_rhs(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import _check_lua_global_variable_leaks
+
+        lua_src = (
+            "local function Migrate(quest, version, targetVersion)\n"
+            "    local didMigrate = (quest.schemaVersion ~= version)\n"
+            "    while version < targetVersion do\n"
+            "        version = version + 1\n"
+            "        didMigrate = true\n"
+            "    end\n"
+            "    return didMigrate\n"
+            "end\n"
+        )
+        ctx = {"all_global_tables": set(), "saved_variables": set()}
+        issues = []
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True):
+            _check_lua_global_variable_leaks(lua_src, lua_src.splitlines(), ctx, issues)
+        self.assertEqual(issues, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

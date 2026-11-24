@@ -940,6 +940,22 @@ def collect_addon_context(extract_dir):
                     except Exception:
                         pass
 
+        for root, _, files in os.walk(extract_dir):
+            for f in files:
+                if f.lower().endswith((".addon", ".txt")):
+                    try:
+                        with open(os.path.join(root, f), "r", encoding="utf-8", errors="ignore") as pre_mf:
+                            pre_text = pre_mf.read()
+                        if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", pre_text, flags=re.MULTILINE | re.IGNORECASE):
+                            for m_line in pre_text.splitlines():
+                                sv_match = re.match(r"^\s*##\s*SavedVariables\s*:\s*(.+)$", m_line.strip(), flags=re.IGNORECASE)
+                                if sv_match:
+                                    sv_rhs = re.split(r"[#;]", sv_match.group(1), maxsplit=1)[0]
+                                    for sv_name in re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", sv_rhs):
+                                        saved_variables.add(sv_name)
+                    except Exception:
+                        pass
+
         bundled_sub_addons = set()
         global_tables_by_file = defaultdict(set)
         lua_texts_for_dyn_g = []
@@ -1001,29 +1017,41 @@ def collect_addon_context(extract_dir):
                         tok_rx = re.compile(r'\b(function|if|for|while|repeat|do|end|until)\b')
                         for ln_no, code_ln in enumerate(lua_no_str.splitlines(), 1):
                             if brace_depth == 0 and not block_stack:
-                                m_loc_tbl = re.match(r'^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{', code_ln)
+                                m_loc_tbl = re.match(r'^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=', code_ln)
                                 if m_loc_tbl:
                                     top_level_local_tables.add(m_loc_tbl.group(1))
-                                m_tbl = re.match(
-                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|([A-Za-z_][A-Za-z0-9_]*)\s*$)',
-                                    code_ln,
-                                )
-                                if m_tbl:
-                                    m_name = m_tbl.group(1)
-                                    rhs_ident = m_tbl.group(2)
+                                m_any_top = re.match(r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)', code_ln)
+                                if m_any_top:
+                                    m_name = m_any_top.group(1)
                                     scoped_locals = line_scopes[ln_no - 1] if (ln_no - 1) < len(line_scopes) else set()
-                                    is_valid_rhs = (rhs_ident is None) or (rhs_ident in file_locals or rhs_ident in scoped_locals)
-                                    if is_valid_rhs and m_name not in file_locals and m_name not in scoped_locals and m_name not in ESOUI_GLOBAL_DEFINES:
+                                    if (
+                                        m_name not in LUA_KEYWORDS
+                                        and m_name not in file_locals
+                                        and m_name not in scoped_locals
+                                        and m_name not in saved_variables
+                                        and m_name not in ESOUI_GLOBAL_DEFINES
+                                        and m_name not in ESOUI_RAM_DICTIONARY
+                                        and m_name not in ESOUI_UNDOCUMENTED_SET
+                                    ):
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
-                            elif brace_depth == 0 and top_level_local_tables:
-                                m_eof_export = re.match(
-                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$',
+                            elif brace_depth == 0 and block_stack:
+                                m_inner_tbl = re.match(
+                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_.]*\s*:\s*Subclass\s*\()',
                                     code_ln,
                                 )
-                                if m_eof_export and m_eof_export.group(2) in top_level_local_tables:
-                                    m_name = m_eof_export.group(1)
-                                    if m_name not in file_locals and m_name not in ESOUI_GLOBAL_DEFINES:
+                                if m_inner_tbl:
+                                    m_name = m_inner_tbl.group(1)
+                                    scoped_locals = line_scopes[ln_no - 1] if (ln_no - 1) < len(line_scopes) else set()
+                                    if (
+                                        m_name not in LUA_KEYWORDS
+                                        and m_name not in file_locals
+                                        and m_name not in scoped_locals
+                                        and m_name not in saved_variables
+                                        and m_name not in ESOUI_GLOBAL_DEFINES
+                                        and m_name not in ESOUI_RAM_DICTIONARY
+                                        and m_name not in ESOUI_UNDOCUMENTED_SET
+                                    ):
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             brace_depth = max(0, brace_depth + code_ln.count("{") - code_ln.count("}"))
@@ -1155,8 +1183,9 @@ def _extract_multiline_local_decls(code_only):
         first_rhs = m.group(1)
         while cur_idx < total:
             seg = first_rhs if cur_idx == idx else lines.__getitem__(cur_idx)
-            if "=" in seg and not re.search(r'(?:==|~=)', seg):
-                lhs_part = seg.split("=", 1).__getitem__(0)
+            m_assign = re.search(r'(?<![=!<>~])=(?!=)', seg)
+            if m_assign:
+                lhs_part = seg[:m_assign.start()]
                 collected_parts.append(lhs_part)
                 break
             collected_parts.append(seg)
