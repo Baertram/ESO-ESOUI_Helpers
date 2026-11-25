@@ -756,37 +756,19 @@ def find_uncommented_libstub_hits(content):
             candidates.add(f"{resolved_owner}.{member}")
             candidates.add(f"{resolved_owner}:{member}")
         return any(c in excluded_exact or c.lower() in excluded_lower for c in candidates)
+    excluded_line_ranges = []
+    if excluded_lower:
+        for fn_key, (_, _, s_ln, e_ln) in _extract_all_lua_function_defs(clean_with_strings).items():
+            if _is_excluded_func(fn_key):
+                excluded_line_ranges.append((s_ln, e_ln))
+
     hits = []
     rx = re.compile(r'\blibstub\b', flags=re.IGNORECASE)
-    fn_def_rx = re.compile(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(')
-    token_rx = re.compile(r'\b(function|if|for|while|repeat|do)\b|\b(end|until)\b')
-    block_stack = []
-
     for idx, line in enumerate(code_only.splitlines(), 1):
-        fn_m = fn_def_rx.search(line)
-        fn_name_on_line = fn_m.group(1) if fn_m else None
-        norm_line = re.sub(r'\b(?:for|while)\b[^;\n]*?\bdo\b', 'for', line)
-
-        tokens = list(token_rx.finditer(norm_line))
-        # Check LibStub either inside an already-excluded function or on the excluded function header itself
-        in_excluded_fn = any(is_excl for _, is_excl in block_stack) or (
-            fn_name_on_line is not None and _is_excluded_func(fn_name_on_line)
-        )
+        in_excluded_fn = any(s_ln <= idx <= e_ln for s_ln, e_ln in excluded_line_ranges)
         if not in_excluded_fn and rx.search(line):
             orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
             hits.append((idx, orig))
-
-        first_fn_consumed = False
-        for tm in tokens:
-            b_open, b_close = tm.groups()
-            if b_open:
-                if b_open == "function" and not first_fn_consumed and fn_name_on_line is not None:
-                    first_fn_consumed = True
-                    block_stack.append(("function", _is_excluded_func(fn_name_on_line)))
-                else:
-                    block_stack.append((b_open, False))
-            elif b_close and block_stack:
-                block_stack.pop()
 
     return hits
 
@@ -1368,6 +1350,104 @@ def _extract_lua_function_body_from_offset(text, func_start_pos):
     return params, text[body_start:]
 
 
+def _extract_all_lua_function_defs(clean_lua, owner_tables=None):
+    """
+    Extracts all Lua function definitions across:
+      1) 'function Name(...)' / 'local function Name(...)' / 'function Obj.Name(...)' / 'function Obj:Name(...)'
+      2) 'Obj.Name = function(...)'
+      3) Table-literal fields 'Name = function(...)' and '["Name"] = function(...)' (resolving enclosing table names)
+    Returns dict mapping full_name & short_name -> (params_list, body_text, start_line_no, end_line_no).
+    """
+    defs = {}
+    if not clean_lua:
+        return defs
+
+    table_ranges = []
+    tbl_rx = re.compile(r'\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\{')
+    for tm in tbl_rx.finditer(clean_lua):
+        tbl_name = tm.group(1)
+        brace_pos = tm.end() - 1
+        depth = 0
+        in_q = None
+        esc = False
+        end_brace = -1
+        for idx, ch in enumerate(clean_lua):
+            if idx < brace_pos:
+                continue
+            if in_q:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == in_q:
+                    in_q = None
+                continue
+            if ch in ('"', "'"):
+                in_q = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_brace = idx
+                    break
+        if end_brace > brace_pos:
+            table_ranges.append((brace_pos, end_brace, tbl_name))
+
+    def _find_enclosing_tables(pos):
+        owners = []
+        for s_pos, e_pos, t_name in table_ranges:
+            if s_pos < pos < e_pos:
+                owners.append(t_name)
+        for gt in (owner_tables or ()):
+            if gt and gt not in owners:
+                owners.append(gt)
+        return owners
+
+    def _store_def(full_name, params, body, start_ln, end_ln):
+        defs[full_name] = (params, body, start_ln, end_ln)
+        short_fn = full_name.rsplit(".", 1).__getitem__(-1).rsplit(":", 1).__getitem__(-1)
+        defs.setdefault(short_fn, (params, body, start_ln, end_ln))
+
+    for fm in re.finditer(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(', clean_lua):
+        full_fn = fm.group(1)
+        params, body = _extract_lua_function_body_from_offset(clean_lua, fm.start())
+        if ":" in full_fn and "self" not in params:
+            params = ["self"] + list(params)
+        start_ln = clean_lua.count("\n", 0, fm.start()) + 1
+        end_ln = start_ln + body.count("\n")
+        _store_def(full_fn, params, body, start_ln, end_ln)
+
+    for fm2 in re.finditer(r'\b([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*function\s*\(', clean_lua):
+        lhs_name = fm2.group(1)
+        fn_kw_pos = clean_lua.find("function", fm2.start())
+        if fn_kw_pos == -1:
+            continue
+        params, body = _extract_lua_function_body_from_offset(clean_lua, fn_kw_pos)
+        start_ln = clean_lua.count("\n", 0, fm2.start()) + 1
+        end_ln = start_ln + body.count("\n")
+        if "." in lhs_name:
+            _store_def(lhs_name, params, body, start_ln, end_ln)
+        else:
+            defs.setdefault(lhs_name, (params, body, start_ln, end_ln))
+            for owner in _find_enclosing_tables(fm2.start()):
+                defs[f"{owner}.{lhs_name}"] = (params, body, start_ln, end_ln)
+
+    for fm3 in re.finditer(r'\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]\s*=\s*function\s*\(', clean_lua):
+        key_name = fm3.group(1)
+        fn_kw_pos = clean_lua.find("function", fm3.start())
+        if fn_kw_pos == -1:
+            continue
+        params, body = _extract_lua_function_body_from_offset(clean_lua, fn_kw_pos)
+        start_ln = clean_lua.count("\n", 0, fm3.start()) + 1
+        end_ln = start_ln + body.count("\n")
+        defs.setdefault(key_name, (params, body, start_ln, end_ln))
+        for owner in _find_enclosing_tables(fm3.start()):
+            defs[f"{owner}.{key_name}"] = (params, body, start_ln, end_ln)
+
+    return defs
+
+
 def _get_event_filter_spec(event_name):
     """Returns (allowed_filter_types_set, rule_title) for filterable ESO events or (None, None)."""
     _sync_wiki_event_filters_once()
@@ -1397,12 +1477,10 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
     reg_rx = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_.:]*\s*:\s*)?RegisterForEvent\s*\(')
     flt_rx = re.compile(r'(?:[A-Za-z_][A-Za-z0-9_.:]*\s*:\s*)?AddFilterForEvent\s*\(')
 
-    func_bodies = {}
-    for fm in re.finditer(r'\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(', clean_code):
-        full_fn = fm.group(1)
-        params, body = _extract_lua_function_body_from_offset(clean_code, fm.start())
-        func_bodies[full_fn] = (params, body)
-        func_bodies[full_fn.split(".")[-1].split(":")[-1]] = (params, body)
+    func_bodies = {
+        k: (v.__getitem__(0), v.__getitem__(1))
+        for k, v in _extract_all_lua_function_defs(clean_code).items()
+    }
 
     filters_by_event = defaultdict(list)
     for m in flt_rx.finditer(clean_code):
@@ -1474,6 +1552,7 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
             continue
         if not cb_params or not cb_body:
             continue
+        self_shift = 1 if cb_params.__getitem__(0) == "self" else 0
         applied_filter_types = {ft for pairs in matching_handles for ft, _ in pairs}
 
         for pairs in matching_handles:
@@ -1487,8 +1566,9 @@ def _check_lua_event_filters(content, raw_lines, lua_issues):
                         ):
                             p_idx = s_idx
                             break
-                if p_idx is not None and p_idx < len(cb_params):
-                    param_var = cb_params[p_idx]
+                eff_idx = (p_idx + self_shift) if p_idx is not None else None
+                if eff_idx is not None and eff_idx < len(cb_params):
+                    param_var = cb_params.__getitem__(eff_idx)
                     if param_var and param_var != "_" and re.search(
                         r'\bif\b[^;\n]*\b' + re.escape(param_var) + r'\b\s*(?:==|~=)', cb_body
                     ):
@@ -1674,14 +1754,11 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
             continue
         raw_lines = clean_lua.splitlines()
 
-        for fm in re.finditer(r"\b(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\s*\(", clean_lua):
-            full_fn = fm.group(1)
-            params, body = _extract_lua_function_body_from_offset(clean_lua, fm.start())
-            if ":" in full_fn and "self" not in params:
-                params = ["self"] + list(params)
-            fn_ln = clean_lua.count("\n", 0, fm.start()) + 1
-            func_defs[full_fn] = (params, body, rel_path, fn_ln)
-            func_defs[full_fn.split(".")[-1].split(":")[-1]] = (params, body, rel_path, fn_ln)
+        for fn_key, (params, body, fn_ln, _) in _extract_all_lua_function_defs(clean_lua, all_global_tables).items():
+            if "." in fn_key or ":" in fn_key:
+                func_defs[fn_key] = (params, body, rel_path, fn_ln)
+            else:
+                func_defs.setdefault(fn_key, (params, body, rel_path, fn_ln))
 
         for m in reg_rx.finditer(clean_lua):
             args_raw, _ = _extract_balanced_call_args(clean_lua, m.end() - 1)
@@ -1836,10 +1913,36 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
         reg_ln = reg["line"]
         orig_reg = raw_lines.__getitem__(reg_ln - 1).strip() if (reg_ln - 1) < len(raw_lines) else reg.get("code", "")
         cb_params, cb_body = [], ""
+        cb_owner_table = ""
         if reg.get("cb_inline") is not None:
             cb_params, cb_body = reg["cb_inline"]
+            if len(cb_params) >= 2 and cb_params.__getitem__(1) and cb_params.__getitem__(1) != "_":
+                w_param = re.escape(cb_params.__getitem__(1))
+                if not re.search(rf"\b{w_param}\b\s*(?:==|~=)|(?:==|~=)\s*\b{w_param}\b", cb_body):
+                    del_m = re.search(
+                        rf"\b([A-Za-z_][A-Za-z0-9_.]*)\s*([.:])\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*\b{w_param}\b[^)]*)\)"
+                        rf"|\b([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*\b{w_param}\b[^)]*)\)",
+                        cb_body,
+                    )
+                    if del_m:
+                        if del_m.group(3):
+                            cb_owner_table = del_m.group(1)
+                            full_target = f"{del_m.group(1)}.{del_m.group(3)}"
+                            short_target = del_m.group(3)
+                            target_def = func_defs.get(full_target) or func_defs.get(short_target)
+                            if target_def:
+                                t_params, t_body, _, _ = target_def
+                                if del_m.group(2) == ":" and "self" not in t_params:
+                                    t_params = ["self"] + list(t_params)
+                                cb_params, cb_body = t_params, t_body
+                        elif del_m.group(5):
+                            target_def = func_defs.get(del_m.group(5))
+                            if target_def:
+                                cb_params, cb_body, _, _ = target_def
         else:
             cb_key = reg.get("cb_expr", "")
+            if "." in cb_key or ":" in cb_key:
+                cb_owner_table = re.split(r"[.:]", cb_key, maxsplit=1).__getitem__(0)
             if cb_key in func_defs:
                 cb_params, cb_body, _, _ = func_defs[cb_key]
             else:
@@ -1850,13 +1953,15 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
         if not cb_params and not cb_body:
             continue
 
-        if len(cb_params) < 2 or not cb_params.__getitem__(1) or cb_params.__getitem__(1) == "_":
+        self_shift = 1 if cb_params.__getitem__(0) == "self" else 0
+        addon_idx = 1 + self_shift
+        if len(cb_params) <= addon_idx or not cb_params.__getitem__(addon_idx) or cb_params.__getitem__(addon_idx) == "_":
             lua_issues.append(
                 f"EVENT_ADD_ON_LOADED missing addonName parameter for comparison (line {reg_ln}): (-- {orig_reg})"
             )
             continue
 
-        addon_param = cb_params.__getitem__(1)
+        addon_param = cb_params.__getitem__(addon_idx)
         esc_p = re.escape(addon_param)
         cmp_rx = re.compile(
             rf"""(?:\b{esc_p}\b\s*(?:==|~=)\s*([^\s);,\]]+)|([^\s(;,]+)\s*(?:==|~=)\s*\b{esc_p}\b)"""
@@ -1877,7 +1982,10 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
             exact_ok = False
             mismatch_found = None
             for tok in comparisons:
-                resolved_cmp = _resolve_lua_string_expr(tok, str_consts)
+                lookup_tok = f"{cb_owner_table}.{tok[5:]}" if (cb_owner_table and tok.startswith("self.")) else tok
+                resolved_cmp = _resolve_lua_string_expr(lookup_tok, str_consts)
+                if resolved_cmp is None and tok.startswith("self."):
+                    resolved_cmp = _resolve_lua_string_expr(tok[5:], str_consts)
                 if resolved_cmp is None or resolved_cmp == expected_addon_name:
                     exact_ok = True
                     break

@@ -1304,5 +1304,54 @@ class TestEsouiModularSmoke(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+    def test_26_table_literal_methods_for_addon_loaded_event_filters_and_libstub(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "SimpleDPS")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "SimpleDPS.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: SimpleDPS\n## APIVersion: 101051\nSimpleDPS.lua\nSimpleDPS_UI.lua\n")
+            with open(os.path.join(addon_dir, "SimpleDPS_UI.lua"), "w", encoding="utf-8") as uf:
+                uf.write("local SDPS = SimpleDPS\n")
+            lua_src = (
+                "SimpleDPS = {\n"
+                '    name = "SimpleDPS",\n'
+                "    GetLibAddonMenu = function()\n"
+                '        return LibStub("LibAddonMenu-2.0", true)\n'
+                "    end,\n"
+                "    OnUnitCreated = function(self, eventCode, unitTag)\n"
+                "        if unitTag == 'player' then end\n"
+                "    end,\n"
+                "    OnAddOnLoaded = function(self, event, addonName)\n"
+                "        if addonName == self.name then\n"
+                "            EVENT_MANAGER:UnregisterForEvent(self.name, EVENT_ADD_ON_LOADED)\n"
+                "        end\n"
+                "    end,\n"
+                "}\n"
+                "EVENT_MANAGER:RegisterForEvent(SimpleDPS.name, EVENT_UNIT_CREATED, SimpleDPS.OnUnitCreated)\n"
+                "EVENT_MANAGER:AddFilterForEvent(SimpleDPS.name, EVENT_UNIT_CREATED, REGISTER_FILTER_UNIT_TAG, 'player')\n"
+                "EVENT_MANAGER:RegisterForEvent(SimpleDPS.name, EVENT_ADD_ON_LOADED, function(event, addonName) SimpleDPS:OnAddOnLoaded(event, addonName) end)\n"
+            )
+            with open(os.path.join(addon_dir, "SimpleDPS.lua"), "w", encoding="utf-8") as lf:
+                lf.write(lua_src)
+
+            esoui_ram_index.parse_event_signatures_from_api_doc([
+                "* EVENT_UNIT_CREATED (*string* _unitTag_)",
+            ])
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res = analyze_lua_file("SimpleDPS/SimpleDPS.lua", lua_src, tmp_dir, ctx)
+
+            self.assertNotIn("EVENT_ADD_ON_LOADED addonName", res)
+            self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", res)
+            self.assertNotIn("Deprecated LibStub Usage", res)
+            self.assertIn("redundant 'unitTag' check in callback", res)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
