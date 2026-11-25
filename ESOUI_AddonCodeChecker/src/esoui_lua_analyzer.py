@@ -1679,25 +1679,35 @@ def _check_lua_ai_slop_patterns(content, raw_lines):
             report_lines.append(f"  - {ln} ({ident}): --{orig}")
     return "\n".join(report_lines)
 def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None, manifest_stem=""):
-    """Collects string literal constants and table fields (e.g. Addon.name = '...') across addon files."""
+    """Collects top-level string constants, table fields (e.g. Addon.name = '...'), and local table aliases."""
     str_consts = {}
     if manifest_stem:
         str_consts["__MANIFEST_STEM__"] = manifest_stem
     gt_set = set(all_global_tables or ())
-    rx_assign = re.compile(
-        r"""\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*["']([^"'\r\n]+)["']"""
+    rx_top_assign = re.compile(
+        r"""^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*["']([^"'\r\n]+)["']"""
     )
     rx_tbl_field = re.compile(
-        r"""\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']"""
+        r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']"""
     )
+    rx_alias = re.compile(
+        r"""\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)(?!\s*[.:\[(])\b"""
+    )
+
     for _, clean_lua in lua_texts_by_rel_path:
-        for m in rx_assign.finditer(clean_lua):
-            lhs, val = m.group(1), m.group(2)
-            str_consts[lhs] = val
-            if "." in lhs:
-                owner, member = lhs.split(".", 1)
-                if owner in gt_set or member.lower() in ("name", "addonname", "addon_name", "id"):
-                    str_consts.setdefault(member, val)
+        brace_depth = 0
+        for raw_ln in clean_lua.splitlines():
+            if brace_depth == 0:
+                m = rx_top_assign.match(raw_ln)
+                if m:
+                    lhs, val = m.group(1), m.group(2)
+                    str_consts[lhs] = val
+                    if "." in lhs:
+                        owner, member = lhs.split(".", 1)
+                        if owner in gt_set or member.lower() in ("name", "addonname", "addon_name", "id"):
+                            str_consts.setdefault(member, val)
+            brace_depth = max(0, brace_depth + raw_ln.count("{") - raw_ln.count("}"))
+
         for gt in gt_set:
             for tm in re.finditer(r"\b" + re.escape(gt) + r"\s*=\s*\{", clean_lua):
                 brace_start = tm.end() - 1
@@ -1719,6 +1729,17 @@ def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None,
                         str_consts[f"{gt}.{k_name}"] = v_str
                         if k_name.lower() in ("name", "addonname", "addon_name", "id"):
                             str_consts.setdefault(k_name, v_str)
+
+        for am in rx_alias.finditer(clean_lua):
+            alias_name, target_name = am.group(1), am.group(2)
+            if target_name in str_consts:
+                str_consts.setdefault(alias_name, str_consts[target_name])
+            prefix = f"{target_name}."
+            for k_existing, v_existing in list(str_consts.items()):
+                if k_existing.startswith(prefix):
+                    member = k_existing[len(prefix):]
+                    str_consts[f"{alias_name}.{member}"] = v_existing
+
     return str_consts
 
 

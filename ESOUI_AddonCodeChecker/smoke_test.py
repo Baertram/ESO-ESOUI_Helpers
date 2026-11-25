@@ -1353,5 +1353,49 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertIn("redundant 'unitTag' check in callback", res)
 
 
+    def test_27_inner_table_name_fields_do_not_shadow_addon_name_via_local_alias(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "FurysAccountSync")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "FurysAccountSync.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: Fury's Account Sync\n## APIVersion: 101051\nFurysAccountSync.lua\nWindow.lua\n")
+
+            main_lua = (
+                "FurysAccountSync = {\n"
+                '    name = "FurysAccountSync",\n'
+                '    version = "0.2.2",\n'
+                "}\n"
+                "local AS = FurysAccountSync\n"
+                "local function OnLoaded(_, addonName)\n"
+                "    if addonName ~= AS.name then return end\n"
+                "    EVENT_MANAGER:UnregisterForEvent(AS.name, EVENT_ADD_ON_LOADED)\n"
+                "end\n"
+                "EVENT_MANAGER:RegisterForEvent(AS.name, EVENT_ADD_ON_LOADED, OnLoaded)\n"
+            )
+            window_lua = (
+                "local AS = FurysAccountSync\n"
+                "local ACTIONS = {\n"
+                '    { name = "Open the window", key = "open" },\n'
+                "}\n"
+            )
+            with open(os.path.join(addon_dir, "FurysAccountSync.lua"), "w", encoding="utf-8") as f1:
+                f1.write(main_lua)
+            with open(os.path.join(addon_dir, "Window.lua"), "w", encoding="utf-8") as f2:
+                f2.write(window_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res = analyze_lua_file("FurysAccountSync/FurysAccountSync.lua", main_lua, tmp_dir, ctx)
+
+            self.assertNotIn("EVENT_ADD_ON_LOADED check does not match", res)
+            self.assertNotIn("Open the window", res)
+            self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", res)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
