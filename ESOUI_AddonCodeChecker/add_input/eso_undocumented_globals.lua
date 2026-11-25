@@ -7,6 +7,8 @@ ACTION_RESULT_EFFECT_FADED = nil
 ACTION_RESULT_EFFECT_GAINED = nil
 ACTION_RESULT_EFFECT_GAINED_DURATION = nil
 ACTION_RESULT_BEGIN = nil
+CHAT_CATEGORY_MIN_VALUE = nil
+CHAT_CATEGORY_MAX_VALUE = nil 
 
 -- 1. Global Constants (with ITERATION_ / _MIN_VALUE / _MAX_VALUE) --
 ACCOUNT_LABEL_MAX_VALUE = nil --/esoui/Libraries/Utility/ZO_PlatformUtils.lua:31:41 | internalassert(UI_PLATFORM_MAX_VALUE == [[ ACCOUNT_LABEL_MAX_VALUE ]], "There should be a platform account label for every platform")
