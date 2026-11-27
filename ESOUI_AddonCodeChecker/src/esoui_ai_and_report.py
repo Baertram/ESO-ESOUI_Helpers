@@ -6,6 +6,7 @@ import concurrent.futures
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -415,11 +416,55 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_
     return "\n".join(out_lines)
 
 
+def _inspect_dds_header(header_bytes):
+    """
+    Inspects the first 128..148 bytes of a DDS file.
+    Returns (is_valid_dds, width, height, compression_label, is_recommended_dxt3_or_dxt5).
+    """
+    if not header_bytes or len(header_bytes) < 128:
+        return False, 0, 0, "Invalid/Truncated", False
+    magic, dw_size, _flags, height, width = struct.unpack("<4sIIII", header_bytes[:20])
+    if magic != b"DDS " or dw_size != 124 or width <= 0 or height <= 0:
+        return False, 0, 0, "Invalid/Truncated", False
+
+    pf_size, pf_flags, four_cc = struct.unpack("<II4s", header_bytes[76:88])
+    if pf_size != 32:
+        return False, width, height, "Invalid PixelFormat", False
+
+    has_fourcc = bool(pf_flags & 0x4)
+    if has_fourcc:
+        if four_cc == b"DXT5":
+            return True, width, height, "DXT5", True
+        if four_cc == b"DXT3":
+            return True, width, height, "DXT3", True
+        if four_cc == b"DXT1":
+            return True, width, height, "DXT1", False
+        if four_cc == b"DX10":
+            if len(header_bytes) >= 132:
+                dxgi_fmt = struct.unpack("<I", header_bytes[128:132]).__getitem__(0)
+                if dxgi_fmt in (77, 78):
+                    return True, width, height, "DXT5 (BC3/DX10)", True
+                if dxgi_fmt in (74, 75):
+                    return True, width, height, "DXT3 (BC2/DX10)", True
+                if dxgi_fmt in (71, 72):
+                    return True, width, height, "DXT1 (BC1/DX10)", False
+                if dxgi_fmt in (98, 99):
+                    return True, width, height, "BC7 (DX10)", False
+                return True, width, height, f"DX10 (format {dxgi_fmt})", False
+            return False, width, height, "Truncated DX10 Header", False
+        clean_cc = "".join(chr(b) if 32 <= b < 127 else "?" for b in four_cc).strip() or "Unknown FourCC"
+        return True, width, height, clean_cc, False
+
+    return True, width, height, "Uncompressed RGBA/RGB", False
+
+
 def _check_zip_structure(zip_path, report_data):
     """Inspects all ZIP archive entries and populates report_data['zip_tree_bbcode'] & violations."""
     forbidden_entries = []
     disallowed_by_ext = defaultdict(list)
     dds_textures = []
+    dds_invalid_entries = []
+    dds_non_recommended_comp = []
     legacy_font_files = []
     non_addon_files = []
     unreferenced_txt_files = []
@@ -467,7 +512,25 @@ def _check_zip_structure(zip_path, report_data):
 
                 is_doc_or_license = (base_stem in ALLOWED_DOC_STEMS) or (entry_ext in ALLOWED_DOC_EXTENSIONS)
                 if entry_ext == '.dds':
-                    dds_textures.append(normalized)
+                    try:
+                        with zip_ref.open(entry) as dds_fp:
+                            dds_hdr = dds_fp.read(148)
+                    except Exception:
+                        dds_hdr = b""
+                    dds_ok, dds_w, dds_h, dds_fmt, dds_comp_ok = _inspect_dds_header(dds_hdr)
+                    if not dds_ok:
+                        dds_textures.append((normalized, f"invalid/truncated DDS header ({dds_fmt})", True, False))
+                        dds_invalid_entries.append(f"{normalized} (invalid/truncated DDS header)")
+                        flagged_paths.add(normalized)
+                    elif (dds_w % 4 != 0) or (dds_h % 4 != 0):
+                        dds_textures.append((normalized, f"{dds_w}x{dds_h}, {dds_fmt} - dds textures' height/width must be divisible by 4", True, False))
+                        dds_invalid_entries.append(f"{normalized} ({dds_w}x{dds_h} - dds textures' height/width must be divisible by 4)")
+                        flagged_paths.add(normalized)
+                    elif not dds_comp_ok:
+                        dds_textures.append((normalized, f"{dds_w}x{dds_h}, {dds_fmt} - Best practice: Use DXT5 or DXT3 compression", False, True))
+                        dds_non_recommended_comp.append((dds_fmt, normalized, f"{dds_w}x{dds_h}"))
+                    else:
+                        dds_textures.append((normalized, f"{dds_w}x{dds_h}, {dds_fmt}", False, False))
                 elif entry_ext == '.font':
                     legacy_font_files.append(normalized)
                 elif is_doc_or_license:
@@ -495,9 +558,17 @@ def _check_zip_structure(zip_path, report_data):
                 non_addon_files.extend(unreferenced_txt_files)
 
             if dds_textures:
-                print(f"    ├── {C.CYAN}Textures (.dds) found ({len(dds_textures)}):{C.RESET}")
-                for tex in sorted(dds_textures):
-                    print(f"    │     - {tex}")
+                has_dds_crit = any(item.__getitem__(2) for item in dds_textures)
+                has_dds_bp = any(item.__getitem__(3) for item in dds_textures)
+                dds_hdr_col = C.RED if has_dds_crit else (C.YELLOW if has_dds_bp else C.CYAN)
+                print(f"    ├── {dds_hdr_col}Textures (.dds) found ({len(dds_textures)}):{C.RESET}")
+                for tex_path, tex_info, is_crit_dds, is_bp_dds in sorted(dds_textures, key=lambda x: x.__getitem__(0).lower()):
+                    if is_crit_dds:
+                        print(f"    │     {C.RED}- [CRITICAL] {tex_path} ({tex_info}){C.RESET}")
+                    elif is_bp_dds:
+                        print(f"    │     {C.YELLOW}- {tex_path} ({tex_info}){C.RESET}")
+                    else:
+                        print(f"    │     - {tex_path} ({tex_info})")
             else:
                 print("    ├── Textures (.dds): None")
 
@@ -587,6 +658,12 @@ def _check_zip_structure(zip_path, report_data):
 
             if forbidden_entries:
                 report_data["zip_violations"].append("Hidden, OS-metadata, or development folders/files found")
+            for dds_err in dds_invalid_entries:
+                report_data["zip_violations"].append(f"Invalid .dds texture: {dds_err}")
+            if dds_non_recommended_comp:
+                grouped_dds = report_data.setdefault("dds_compression_grouped", defaultdict(list))
+                for dds_fmt_lbl, dds_fp, dds_dims in dds_non_recommended_comp:
+                    grouped_dds[dds_fmt_lbl].append((dds_fp, dds_dims))
             for ext, files in disallowed_by_ext.items():
                 report_data["zip_violations"].append(f"Disallowed file extension '{ext}' found ({len(files)} file(s))")
             for nf, is_crit in non_addon_files:
@@ -803,7 +880,9 @@ def _run_ai_code_review(addon_code_bundle):
         review_payload = f"### START_FILE: {display_label}\n\n[SOURCE_CODE]\n{part_code}\n### END_FILE: {display_label}\n"
         prompt = (
             f"You are a strict, silent code reviewer for Elder Scrolls Online addons.\n"
-            f"Review the code section below (which may be a numbered part of a larger file) against these rules:\n{CUSTOM_RULES}\n\n"
+            f"Review the code section below (which may be a numbered part of a larger file) against these rules:\n{CUSTOM_RULES}\n"
+            f"IMPORTANT: All .dds texture files (dimensions and compression) are already checked statically by the ZIP analyzer. "
+            f"NEVER output any claims or rules about .dds texture dimensions, power-of-two, divisibility, or .dds compression.\n\n"
             f"FILE TO REVIEW:\n\"\"\"\n{review_payload}\n\"\"\"\n\n"
             f"Output ONLY plain text using:\n"
             f"--- [File: {orig_rel_path}] ---\n[STATUS] PASS or FAIL\n"
@@ -1226,13 +1305,14 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
     include_multi_globals = is_bp_multi_globals_enabled()
     missing_addon_refs = report_data.get("missing_local_addon_ref") or {}
     hardcoded_lang_files = report_data.get("hardcoded_lang_files") or []
+    dds_comp_grouped = report_data.get("dds_compression_grouped") or {}
     has_bp = (
         bool(report_data["best_practices"])
         or bool(missing_addon_refs)
         or bool(hardcoded_lang_files)
+        or bool(dds_comp_grouped)
         or (include_multi_globals and bool(report_data.get("bp_grouped_globals")))
     )
-
     if has_crit:
         out.append(f'{lb}SIZE="4"{rb}{lb}b{rb}{lb}u{rb}{lb}color="Red"{rb}{lb}FONT="Impact"{rb}Critical violations{lb}/FONT{rb}{lb}/color{rb}{lb}/u{rb}{lb}/b{rb}{lb}/SIZE{rb}')
         if report_data["zip_violations"]:
@@ -1457,6 +1537,20 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
             out.append(f"{lb}u{rb}Hardcoded language files - Use dynamic $(language){lb}/u{rb}")
             out.append(f"{lb}spoiler{rb}\n" + "\n".join(hardcoded_lang_files) + f"\n{lb}/spoiler{rb}")
 
+        if dds_comp_grouped:
+            out.append("")
+            out.append(f"{lb}u{rb}Possible action: DDS texture compression should be DXT5 or DXT3{lb}/u{rb}")
+            out.append(f"{lb}list{rb}")
+            for fmt_label in sorted(dds_comp_grouped.keys(), key=lambda x: x.lower()):
+                items_sorted = sorted(dds_comp_grouped[fmt_label], key=lambda it: str(next(iter(it))).lower())
+                formatted_files = ", ".join(
+                    f"{_strip_addon_root_prefix(fp)} ({dims})" for fp, dims in items_sorted
+                )
+                out.append(
+                    f'{lb}*{rb} {fmt_label} {lb}spoiler{rb}{lb}SIZE="2"{rb}{formatted_files}{lb}/SIZE{rb}{lb}/spoiler{rb}'
+                )
+            out.append(f"{lb}/list{rb}")
+
         if missing_addon_refs:
             out.append("")
             out.append(f"{lb}u{rb}Possible action: local reference to global missing?{lb}/u{rb}")
@@ -1615,12 +1709,44 @@ def _build_bbcode_report_text(zip_name, timestamp_str, report_data, compact_bp=0
         out.append(f'{lb}color="Green"{rb}No critical violations or best practice issues found.{lb}/color{rb}')
 
     return "\n".join(out).strip() + "\n"
+def _close_open_bbcode_tags(text_fragment):
+    """Returns closing vBulletin tags (in LIFO order) for any still-open formatting/container tags."""
+    lb, rb = chr(91), chr(93)
+    tag_rx = re.compile(
+        rf'{re.escape(lb)}(/?)(b|u|i|s|color|size|font|url|spoiler|list)(?:=[^\]\r\n]+)?{re.escape(rb)}',
+        flags=re.IGNORECASE,
+    )
+    open_stack = []
+    for m in tag_rx.finditer(text_fragment):
+        is_closing = bool(m.group(1))
+        raw_name = m.group(2)
+        low_name = raw_name.lower()
+        if not is_closing:
+            open_stack.append(raw_name)
+        else:
+            for idx in range(len(open_stack) - 1, -1, -1):
+                if open_stack.__getitem__(idx).lower() == low_name:
+                    del open_stack[idx:]
+                    break
+    return "".join(f"{lb}/{tag}{rb}" for tag in reversed(open_stack))
+
+
+def _strip_dangling_bbcode_prefix(text_fragment):
+    """Removes an incomplete trailing '[tag...' fragment if a cut occurred inside a BBCode tag."""
+    lb, rb = chr(91), chr(93)
+    last_open = text_fragment.rfind(lb)
+    if last_open != -1 and text_fragment.find(rb, last_open) == -1:
+        return text_fragment[:last_open]
+    return text_fragment
+
+
 def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS):
-    """Trims oversized [spoiler] bodies first, then falls back to safe line-level truncation with [trunc.]."""
+    """Trims oversized [spoiler] bodies first, then falls back to BBCode-balanced truncation with [trunc.]."""
     if len(rendered_text) <= max_chars:
         return rendered_text
 
     lb, rb = chr(91), chr(93)
+    trunc_marker = f"{lb}trunc.{rb}"
     spoiler_rx = re.compile(
         rf'({re.escape(lb)}spoiler{re.escape(rb)}(?:{re.escape(lb)}SIZE="2"{re.escape(rb)})?)(.*?)((?:{re.escape(lb)}/SIZE{re.escape(rb)})?{re.escape(lb)}/spoiler{re.escape(rb)})',
         flags=re.DOTALL,
@@ -1631,8 +1757,14 @@ def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS)
             head, body, tail = m.group(1), m.group(2), m.group(3)
             if len(body) <= max_body_len:
                 return m.group(0)
-            cut = body[:max(0, max_body_len - 10)].rstrip()
-            return f"{head}{cut} [trunc.]{tail}"
+            budget = max(0, max_body_len - len(trunc_marker) - 1)
+            cut = _strip_dangling_bbcode_prefix(body[:budget]).rstrip()
+            closing_tags = _close_open_bbcode_tags(cut)
+            while closing_tags and len(cut) + 1 + len(trunc_marker) + len(closing_tags) > max_body_len and cut:
+                trim_step = max(1, (len(cut) + 1 + len(trunc_marker) + len(closing_tags)) - max_body_len)
+                cut = _strip_dangling_bbcode_prefix(cut[:max(0, len(cut) - trim_step)]).rstrip()
+                closing_tags = _close_open_bbcode_tags(cut)
+            return f"{head}{cut} {trunc_marker}{closing_tags}{tail}"
         return spoiler_rx.sub(_repl, text_in)
 
     candidate = rendered_text
@@ -1641,12 +1773,22 @@ def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS)
         if len(candidate) <= max_chars:
             return candidate
 
-    suffix = "\n[trunc.]\n"
-    keep_len = max(0, max_chars - len(suffix))
-    cut_text = candidate[:keep_len]
+    keep_len = max(0, max_chars - len(trunc_marker) - 4)
+    cut_text = _strip_dangling_bbcode_prefix(candidate[:keep_len])
     if "\n" in cut_text:
-        cut_text = cut_text.rsplit("\n", 1)[0]
-    return cut_text.rstrip() + suffix
+        cut_text = cut_text.rsplit("\n", 1).__getitem__(0)
+    cut_text = _strip_dangling_bbcode_prefix(cut_text).rstrip()
+    closing_tags = _close_open_bbcode_tags(cut_text)
+    suffix = f"\n{trunc_marker}{closing_tags}\n"
+    while len(cut_text) + len(suffix) > max_chars and cut_text:
+        if "\n" in cut_text:
+            cut_text = cut_text.rsplit("\n", 1).__getitem__(0).rstrip()
+        else:
+            cut_text = cut_text[:max(0, max_chars - len(suffix))].rstrip()
+        cut_text = _strip_dangling_bbcode_prefix(cut_text).rstrip()
+        closing_tags = _close_open_bbcode_tags(cut_text)
+        suffix = f"\n{trunc_marker}{closing_tags}\n"
+    return cut_text + suffix
 
 
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
@@ -1806,9 +1948,11 @@ def _count_report_findings(report_data):
 
     bp_map = report_data.get("best_practices") or {}
     missing_refs = report_data.get("missing_local_addon_ref") or {}
+    dds_comp_map = report_data.get("dds_compression_grouped") or {}
     bp_count = (
         sum(len(entries) for entries in bp_map.values())
         + sum(len(entries) for entries in missing_refs.values())
+        + sum(len(entries) for entries in dds_comp_map.values())
         + len(report_data.get("hardcoded_lang_files") or ())
         + len(report_data.get("unverified_globals") or ())
     )

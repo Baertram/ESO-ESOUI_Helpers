@@ -1489,6 +1489,12 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 'local bossEntry = {\n'
                 '    name = "Invulnerable Boss 5",\n'
                 '}\n'
+                'local function ShowOrHideBars()\n'
+                '    local name = "Example Boss 1"\n'
+                '    if true then\n'
+                '        name = "Invulnerable Boss 5"\n'
+                '    end\n'
+                'end\n'
             )
             with open(os.path.join(addon_dir, "main", "CrutchAlerts.lua"), "w", encoding="utf-8") as f1:
                 f1.write(main_lua)
@@ -1602,6 +1608,149 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 res_main,
             )
             self.assertNotIn("Global Function Pollution", res_main)
+
+    def test_32_bbcode_truncation_closes_open_tags_and_grave_table_fields(self):
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _enforce_report_char_limit, _render_final_bbcode_report
+        from src.esoui_lua_analyzer import _check_lua_global_variable_leaks
+
+        # 1. Verify [trunc.] never leaves dangling unclosed BBCode tags ([b], [u], [spoiler], [list], [SIZE])
+        lb, rb = chr(91), chr(93)
+        long_spoiler = (
+            f'{lb}spoiler{rb}{lb}SIZE="2"{rb}'
+            f'{lb}u{rb}{lb}b{rb}\\kpui_core\\kpui_settings_very_long_filename_path.lua{lb}/b{rb}{lb}/u{rb}\n'
+            f'  12: leakedAlpha = 1\n'
+            f'{lb}u{rb}{lb}b{rb}\\kpui_core\\kpui_other.lua{lb}/b{rb}{lb}/u{rb}\n'
+            f'  99: leakedBeta = 2'
+            f'{lb}/SIZE{rb}{lb}/spoiler{rb}'
+        )
+        shrunk = _enforce_report_char_limit(long_spoiler, max_chars=75)
+        self.assertLessEqual(len(shrunk), 75)
+        self.assertIn(f'{lb}trunc.{rb}{lb}/b{rb}{lb}/u{rb}', shrunk)
+        self.assertEqual(shrunk.count(f'{lb}b{rb}'), shrunk.count(f'{lb}/b{rb}'))
+        self.assertEqual(shrunk.count(f'{lb}u{rb}'), shrunk.count(f'{lb}/u{rb}'))
+        self.assertEqual(shrunk.count(f'{lb}spoiler{rb}'), shrunk.count(f'{lb}/spoiler{rb}'))
+
+        # 2. Verify full report > 9999 chars keeps balanced tags after hard truncation
+        huge_pollution = [
+            (f"KpuiCore/modules/kpui_settings_module_{i:03d}.lua", i + 10, f"leakedVar{i}", f"leakedVar{i} = {i}")
+            for i in range(1, 260)
+        ]
+        report_data = {
+            "zip_all_entries": ["KpuiCore/", "KpuiCore/KpuiCore.txt"],
+            "zip_flagged_paths": set(),
+            "zip_manifest_paths": {"KpuiCore/KpuiCore.txt"},
+            "zip_tree_bbcode": "",
+            "zip_violations": [],
+            "global_var_pollution": huge_pollution,
+            "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+            "best_practices": defaultdict(list),
+        }
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
+            tmp_rep = tf.name
+        try:
+            _render_final_bbcode_report(tmp_rep, "KpuiCore.zip", "2026-11-27 07:45:00 PM", report_data)
+            with open(tmp_rep, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+            self.assertLessEqual(len(rendered), 9999)
+            self.assertIn(f"{lb}trunc.{rb}", rendered)
+            for tag in ("b", "u", "i", "spoiler", "list"):
+                self.assertEqual(
+                    rendered.lower().count(f"{lb}{tag}{rb}"),
+                    rendered.lower().count(f"{lb}/{tag}{rb}"),
+                    f"Unbalanced BBCode tag [{tag}] after truncation",
+                )
+        finally:
+            if os.path.exists(tmp_rep):
+                os.remove(tmp_rep)
+
+        # 3. Verify Grave()/Present() table constructor fields {rects = {}, labels = {}} are not flagged as global tables or leaks
+        from src.esoui_lua_analyzer import collect_addon_context
+
+        grave_lua = (
+            "local graves = {}\n"
+            "local presentControls = {}\n"
+            "local graveAnimations = {}\n"
+            "local function Grave(unitTag)\n"
+            "    graves[unitTag] = {rects = {}, labels = {}}\n"
+            "    presentControls[unitTag] = {rects = {}, labels = {}}\n"
+            "    for _, rect in ipairs(graveRects)\n"
+            "    do\n"
+            "        CreateControlFromElement(rect, graves[unitTag].rects, graves[unitTag].labels)\n"
+            "    end\n"
+            "    graveAnimations[unitTag] = 1000\n"
+            "end\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp_addon_dir:
+            ca_dir = os.path.join(tmp_addon_dir, "CrutchAlerts")
+            os.makedirs(os.path.join(ca_dir, "main"), exist_ok=True)
+            os.makedirs(os.path.join(ca_dir, "drawing", "model"), exist_ok=True)
+            with open(os.path.join(ca_dir, "CrutchAlerts.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: CrutchAlerts\nmain/CrutchAlerts.lua\ndrawing/model/Model.lua\n")
+            with open(os.path.join(ca_dir, "main", "CrutchAlerts.lua"), "w", encoding="utf-8") as f1:
+                f1.write('CrutchAlerts = { name = "CrutchAlerts" }\n')
+            with open(os.path.join(ca_dir, "drawing", "model", "Model.lua"), "w", encoding="utf-8") as f2:
+                f2.write(grave_lua)
+            ctx_ca = collect_addon_context(tmp_addon_dir)
+            self.assertEqual(ctx_ca.get("all_global_tables"), {"CrutchAlerts"})
+
+        issues = []
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True):
+            _check_lua_global_variable_leaks(
+                grave_lua,
+                grave_lua.splitlines(),
+                {"all_global_tables": {"CrutchAlerts"}, "saved_variables": set()},
+                issues,
+            )
+        self.assertEqual(issues, [])
+
+    def test_33_dds_texture_dimensions_and_compression(self):
+        import struct
+        import zipfile
+        from src.esoui_ai_and_report import _check_zip_structure, _render_final_bbcode_report
+
+        def _make_dds_bytes(width, height, four_cc=b"DXT5", has_fourcc=True):
+            pf_flags = 0x4 if has_fourcc else 0x41
+            header_part1 = struct.pack("<4sIIII", b"DDS ", 124, 0x1007, height, width)
+            pad_mid = b"\x00" * 56
+            pf_block = struct.pack("<II4sIIIII", 32, pf_flags, four_cc, 0, 0, 0, 0, 0)
+            pad_end = b"\x00" * 20
+            return header_part1 + pad_mid + pf_block + pad_end
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            zp = os.path.join(tmp_dir, "TextureTestAddon.zip")
+            with zipfile.ZipFile(zp, "w") as zf:
+                zf.writestr("TextureTestAddon/TextureTestAddon.txt", "## Title: TextureTestAddon\n")
+                zf.writestr("TextureTestAddon/tex_ok_dxt5.dds", _make_dds_bytes(64, 64, b"DXT5", True))
+                zf.writestr("TextureTestAddon/tex_ok_dxt3.dds", _make_dds_bytes(128, 32, b"DXT3", True))
+                zf.writestr("TextureTestAddon/tex_bp_dxt1.dds", _make_dds_bytes(64, 64, b"DXT1", True))
+                zf.writestr("TextureTestAddon/Arrowhead.dds", _make_dds_bytes(64, 64, b"\x00\x00\x00\x00", False))
+                zf.writestr("TextureTestAddon/Chevron.dds", _make_dds_bytes(64, 64, b"\x00\x00\x00\x00", False))
+                zf.writestr("TextureTestAddon/tex_bad_size.dds", _make_dds_bytes(30, 32, b"DXT5", True))
+
+            rep = {
+                "zip_tree_bbcode": "",
+                "zip_violations": [],
+                "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+                "best_practices": defaultdict(list),
+            }
+            _check_zip_structure(zp, rep)
+            out_txt = os.path.join(tmp_dir, "report.txt")
+            _render_final_bbcode_report(out_txt, "TextureTestAddon.zip", "2026-11-27 08:15:00 PM", rep)
+            with open(out_txt, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+
+            self.assertIn("dds textures' height/width must be divisible by 4", rendered)
+            self.assertIn(':mad: tex_bad_size.dds', rendered)
+            self.assertIn('[u]Possible action: DDS texture compression should be DXT5 or DXT3[/u]', rendered)
+            self.assertIn('[*] DXT1 [spoiler][SIZE="2"]\\tex_bp_dxt1.dds (64x64)[/SIZE][/spoiler]', rendered)
+            self.assertIn(
+                '[*] Uncompressed RGBA/RGB [spoiler][SIZE="2"]\\Arrowhead.dds (64x64), \\Chevron.dds (64x64)[/SIZE][/spoiler]',
+                rendered,
+            )
+            self.assertEqual(rendered.count('[*] Uncompressed RGBA/RGB'), 1)
+            self.assertNotIn(':mad: tex_ok_dxt5.dds', rendered)
+            self.assertNotIn(':mad: tex_ok_dxt3.dds', rendered)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

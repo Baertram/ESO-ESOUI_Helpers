@@ -1026,11 +1026,14 @@ def collect_addon_context(extract_dir):
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             elif brace_depth == 0 and block_stack:
-                                m_inner_tbl = re.search(
+                                for m_inner_tbl in re.finditer(
                                     r'(?<![A-Za-z0-9_.:])(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_.]*\s*:\s*Subclass\s*\()',
                                     code_ln,
-                                )
-                                if m_inner_tbl:
+                                ):
+                                    prefix_seg = code_ln[:m_inner_tbl.start(1)]
+                                    inline_depth = brace_depth + prefix_seg.count("{") - prefix_seg.count("}")
+                                    if inline_depth > 0 or prefix_seg.rstrip().endswith(("{", ",")):
+                                        continue
                                     m_name = m_inner_tbl.group(1)
                                     scoped_locals = line_scopes[ln_no - 1] if (ln_no - 1) < len(line_scopes) else set()
                                     if (
@@ -1698,30 +1701,55 @@ def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None,
     if manifest_stem:
         str_consts["__MANIFEST_STEM__"] = manifest_stem
     gt_set = set(all_global_tables or ())
+    if manifest_stem and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", manifest_stem):
+        gt_set.add(manifest_stem)
     rx_top_assign = re.compile(
-        r"""^\s*(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*["']([^"'\r\n]+)["']"""
+        r"""^\s*(local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*["']([^"'\r\n]+)["']"""
     )
     rx_tbl_field = re.compile(
-        r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']"""
+        r"""(?:^|[,;])\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']""",
+        flags=re.MULTILINE,
     )
-    alias_to_target = {}
     rx_alias = re.compile(
         r"""\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)(?!\s*[.:\[(])\b"""
     )
+    block_tok_rx = re.compile(r"\b(function|if|for|while|repeat|do|end|until)\b")
 
     for _, clean_lua in lua_texts_by_rel_path:
         brace_depth = 0
+        block_depth = 0
+        in_loop_hdr = False
         for raw_ln in clean_lua.splitlines():
             if brace_depth == 0:
                 m = rx_top_assign.match(raw_ln)
                 if m:
-                    lhs, val = m.group(1), m.group(2)
-                    str_consts[lhs] = val
+                    is_local_kw, lhs, val = bool(m.group(1)), m.group(2), m.group(3)
                     if "." in lhs:
                         owner, member = lhs.split(".", 1)
-                        if owner in gt_set or member.lower() in ("name", "addonname", "addon_name", "id"):
-                            str_consts.setdefault(member, val)
+                        if owner in gt_set:
+                            str_consts[lhs] = val
+                            if member.lower() == "name" and val == manifest_stem:
+                                str_consts[member] = val
+                            elif member.lower() in ("addonname", "addon_name", "id"):
+                                str_consts.setdefault(member, val)
+                    elif block_depth == 0 and (is_local_kw or lhs in gt_set):
+                        str_consts[lhs] = val
             brace_depth = max(0, brace_depth + raw_ln.count("{") - raw_ln.count("}"))
+            for bm in block_tok_rx.finditer(raw_ln):
+                kw = bm.group(1)
+                if kw in ("for", "while"):
+                    block_depth += 1
+                    in_loop_hdr = True
+                elif kw == "do":
+                    if in_loop_hdr:
+                        in_loop_hdr = False
+                    else:
+                        block_depth += 1
+                elif kw in ("function", "if", "repeat"):
+                    block_depth += 1
+                elif kw in ("end", "until") and block_depth > 0:
+                    block_depth -= 1
+                    in_loop_hdr = False
 
         for gt in gt_set:
             for tm in re.finditer(r"\b" + re.escape(gt) + r"\s*=\s*\{", clean_lua):
@@ -1744,12 +1772,11 @@ def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None,
                         str_consts[f"{gt}.{k_name}"] = v_str
                         if k_name.lower() == "name" and v_str == manifest_stem:
                             str_consts[k_name] = v_str
-                        elif k_name.lower() in ("name", "addonname", "addon_name", "id"):
+                        elif k_name.lower() in ("addonname", "addon_name", "id"):
                             str_consts.setdefault(k_name, v_str)
 
         for am in rx_alias.finditer(clean_lua):
             alias_name, target_name = am.group(1), am.group(2)
-            alias_to_target[alias_name] = target_name
             if target_name in str_consts:
                 str_consts.setdefault(alias_name, str_consts[target_name])
             prefix = f"{target_name}."
@@ -1777,7 +1804,7 @@ def _resolve_lua_string_expr(expr, str_consts):
             m_stem = str_consts.get("__MANIFEST_STEM__")
             if owner_part == m_stem or f"{owner_part}.{member}" in str_consts:
                 return str_consts.get(f"{owner_part}.{member}", m_stem)
-        if member in str_consts:
+        if member.lower() != "name" and member in str_consts:
             return str_consts[member]
     return None
 
@@ -1851,6 +1878,51 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
         file_str_consts = _get_scoped_symbols(owning_stem)
         str_consts.update(file_str_consts)
 
+        enclosing_owner_spans = []
+        for tm in re.finditer(r"\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*\{", clean_lua):
+            owner_tbl = tm.group(1)
+            b_start = tm.end() - 1
+            depth = 0
+            in_q = None
+            esc = False
+            b_end = -1
+            for idx_c in range(b_start, len(clean_lua)):
+                ch = clean_lua[idx_c]
+                if in_q:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == in_q:
+                        in_q = None
+                    continue
+                if ch in ('"', "'"):
+                    in_q = ch
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        b_end = idx_c
+                        break
+            if b_end > b_start:
+                enclosing_owner_spans.append((b_start, b_end, owner_tbl))
+
+        for fm_self in re.finditer(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_.]*)\s*:\s*[A-Za-z_][A-Za-z0-9_]*\s*\(", clean_lua):
+            _, fn_b = _extract_lua_function_body_from_offset(clean_lua, fm_self.start())
+            enclosing_owner_spans.append((fm_self.start(), fm_self.end() + len(fn_b), fm_self.group(1)))
+
+        def _resolve_ns_at_pos(ns_expr, char_pos):
+            res = _resolve_lua_string_expr(ns_expr, file_str_consts)
+            if res is None and ns_expr.startswith("self."):
+                mem_part = ns_expr[5:]
+                for s_pos, e_pos, owner_tbl in enclosing_owner_spans:
+                    if s_pos <= char_pos <= e_pos:
+                        cand = _resolve_lua_string_expr(f"{owner_tbl}.{mem_part}", file_str_consts)
+                        if cand is not None:
+                            return cand
+            return res
+
         for fn_key, (params, body, fn_ln, _) in _extract_all_lua_function_defs(clean_lua, all_global_tables).items():
             if "." in fn_key or ":" in fn_key:
                 func_defs[fn_key] = (params, body, rel_path, fn_ln)
@@ -1877,7 +1949,7 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
                 "file": rel_path,
                 "line": ln,
                 "ns_expr": ns_expr,
-                "ns_resolved": _resolve_lua_string_expr(ns_expr, file_str_consts),
+                "ns_resolved": _resolve_ns_at_pos(ns_expr, m.start()),
                 "cb_expr": cb_expr,
                 "cb_inline": cb_inline,
                 "code": orig_ln,
@@ -1897,7 +1969,7 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
                 "file": rel_path,
                 "line": ln,
                 "ns_expr": ns_expr,
-                "ns_resolved": _resolve_lua_string_expr(ns_expr, file_str_consts),
+                "ns_resolved": _resolve_ns_at_pos(ns_expr, m.start()),
                 "code": orig_ln,
             })
 
@@ -2222,6 +2294,7 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
     )
 
     scope_stack = []
+    in_loop_header = False
     token_rx = re.compile(
         r'(\{)|(\})|\b(function|if|for|while|repeat|do)\b|\b(end|until)\b|(?<![A-Za-z0-9_.:])([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)'
     )
@@ -2232,9 +2305,8 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
             continue
         is_local_stmt = stripped.startswith("local ")
         scoped_locals = line_local_scopes[idx - 1] if idx - 1 < len(line_local_scopes) else set()
-        line_for_tokens = re.sub(r'\b(for|while)\b([^;\n]*?)\bdo\b', lambda mm: f"{mm.group(1)}{mm.group(2)}  ", line)
 
-        for m in token_rx.finditer(line_for_tokens):
+        for m in token_rx.finditer(line):
             g_open_brace, g_close_brace, g_block_open, g_block_close, var_name = m.groups()
             if g_open_brace:
                 scope_stack.append("table")
@@ -2242,9 +2314,24 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
                 if scope_stack and scope_stack[-1] == "table":
                     scope_stack.pop()
             elif g_block_open:
-                scope_stack.append("block")
+                if g_block_open in ("for", "while"):
+                    scope_stack.append("loop")
+                    in_loop_header = True
+                elif g_block_open == "do":
+                    if in_loop_header:
+                        in_loop_header = False
+                    else:
+                        scope_stack.append("block")
+                else:
+                    scope_stack.append("block")
             elif g_block_close:
-                if scope_stack and scope_stack[-1] == "block":
+                if g_block_close == "until":
+                    while scope_stack:
+                        if scope_stack.pop() != "table":
+                            break
+                elif scope_stack and scope_stack[-1] in ("block", "loop"):
+                    if scope_stack[-1] == "loop":
+                        in_loop_header = False
                     scope_stack.pop()
             elif var_name and not is_local_stmt:
                 if scope_stack and scope_stack[-1] == "table":
