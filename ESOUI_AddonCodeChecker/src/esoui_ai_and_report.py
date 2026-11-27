@@ -591,7 +591,7 @@ def _check_zip_structure(zip_path, report_data):
                 report_data["zip_violations"].append(f"Disallowed file extension '{ext}' found ({len(files)} file(s))")
             for nf, is_crit in non_addon_files:
                 if not is_crit:
-                    report_data["best_practices"]["Possible action: Non-addon-relevant / unreferenced manifest file"].append((nf, None, ""))
+                    report_data["best_practices"]["Possible action: Non-addon-relevant file"].append((nf, None, ""))
     except Exception as e:
         print(f"    └── {C.RED}[ERROR] Failed to read ZIP structure: {str(e)}{C.RESET}")
         report_data["zip_violations"].append(f"Failed to read ZIP structure: {str(e)}")

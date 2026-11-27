@@ -1026,8 +1026,8 @@ def collect_addon_context(extract_dir):
                                         all_global_tables.add(m_name)
                                         global_tables_by_file[rel_f_norm].add(f"{ln_no}: {m_name}")
                             elif brace_depth == 0 and block_stack:
-                                m_inner_tbl = re.match(
-                                    r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_.]*\s*:\s*Subclass\s*\()',
+                                m_inner_tbl = re.search(
+                                    r'(?<![A-Za-z0-9_.:])(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_.]*\s*:\s*Subclass\s*\()',
                                     code_ln,
                                 )
                                 if m_inner_tbl:
@@ -2203,6 +2203,13 @@ def _check_lua_global_variable_leaks(content, raw_lines, addon_ctx, lua_issues, 
     line_local_scopes = _build_line_local_scopes(code_only)
 
     global_tables = set(addon_ctx.get("all_global_tables", set()))
+    for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
+        mf_stem = os.path.splitext(os.path.basename(mf)).__getitem__(0)
+        if mf_stem and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", mf_stem):
+            global_tables.add(mf_stem)
+    for m_stem in ((addon_ctx.get("manifest_dirs") or {}).values()):
+        if m_stem and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", m_stem):
+            global_tables.add(m_stem)
     table_prefixes = tuple(f"{gt}_" for gt in global_tables if gt)
 
     allowed_globals = (
@@ -2406,9 +2413,14 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
         if not fm:
             continue
         g_func = fm.group(1)
-        if g_func not in ESOUI_RAM_DICTIONARY and g_func not in ESOUI_UNDOCUMENTED_SET:
-            if not re.search(r'\blocal\s+' + re.escape(g_func) + r'\b', comment_free_lua):
-                orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
+        if not re.search(r'\blocal\s+' + re.escape(g_func) + r'\b', comment_free_lua):
+            orig = raw_lines[idx - 1].strip() if (idx - 1) < len(raw_lines) else ""
+            if g_func in ESOUI_RAM_DICTIONARY or g_func in ESOUI_UNDOCUMENTED_SET or g_func.startswith("ZO_"):
+                lua_issues.append(
+                    f"Overriding global ESO function '{g_func}' (line {idx}): "
+                    f"Use ZO_PreHook / ZO_PostHook / SecurePostHook instead (-- {orig})"
+                )
+            else:
                 lua_issues.append(
                     f"Global Function Pollution (leaked into _G) (line {idx}): "
                     f"Keep '{g_func}()' local or attach it to your single addon table (-- {orig})"

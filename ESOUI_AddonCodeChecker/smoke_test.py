@@ -1561,5 +1561,47 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertNotIn("Non-unique / too short global variable", res_lua_ok)
             self.assertIn("Non-unique / too short global variable 'TrackerCore'", res_lua_bad)
 
+    def test_31_guarded_addon_table_and_vanilla_eso_function_override(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "LeoAltholic")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "LeoAltholic.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: LeoAltholic\n## APIVersion: 101051\nLeoAltholicInit.lua\nLeoAltholic.lua\n")
+
+            init_lua = (
+                "if not LeoAltholic then\n"
+                "    LeoAltholic = LeoAltholic or {}\n"
+                "end\n"
+            )
+            main_lua = (
+                "local LA = LeoAltholic\n"
+                "function ZO_QuestJournalNavigationEntry_OnMouseUp(label, button, upInside)\n"
+                "    return true\n"
+                "end\n"
+            )
+            with open(os.path.join(addon_dir, "LeoAltholicInit.lua"), "w", encoding="utf-8") as f1:
+                f1.write(init_lua)
+            with open(os.path.join(addon_dir, "LeoAltholic.lua"), "w", encoding="utf-8") as f2:
+                f2.write(main_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertIn("LeoAltholic", ctx.get("all_global_tables"))
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_init = analyze_lua_file("LeoAltholic/LeoAltholicInit.lua", init_lua, tmp_dir, ctx)
+                res_main = analyze_lua_file("LeoAltholic/LeoAltholic.lua", main_lua, tmp_dir, ctx)
+
+            self.assertNotIn("Global Variable Pollution", res_init)
+            self.assertIn(
+                "Overriding global ESO function 'ZO_QuestJournalNavigationEntry_OnMouseUp' (line 2): Use ZO_PreHook / ZO_PostHook / SecurePostHook instead",
+                res_main,
+            )
+            self.assertNotIn("Global Function Pollution", res_main)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
