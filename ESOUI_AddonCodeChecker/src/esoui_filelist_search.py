@@ -481,18 +481,18 @@ def annotate_depends_on_line(
     bundled_internal_deps: Optional[Sequence[str]] = None,
 ) -> Tuple[str, bool, bool]:
     """
-    Annotiert alle Dependencies in einer '## DependsOn:'-Zeile anhand der v4 filelist.json:
-      ## DependsOn: LibAddonMenu-2.0>=38 [current: 43] LibFilters-3.0 [current: 350] LibWhatever [AddOnVersion unknown]
-    Gibt (annotierte_zeile, has_missing_required_ver, has_outdated_ver) zurück.
+    Gibt ausschließlich die beanstandeten Dependencies ohne '## DependsOn:'-Header und ohne 'current:' zurück:
+      LibAddonMenu-2.0>=38, LibFilters-3.0, LibWhatever [AddOnVersion unknown]
+    Rückgabe: (kompakter_befund_text, has_missing_required_ver, has_outdated_ver).
     """
     lb, rb = chr(91), chr(93)
     stripped = raw_line.strip()
     if ":" not in stripped:
         return stripped, False, False
 
-    header, rhs = stripped.split(":", 1)
+    _, rhs = stripped.split(":", 1)
     tokens = rhs.split()
-    annotated_tokens: List[str] = []
+    flagged_tokens: List[str] = []
     has_missing = False
     has_outdated = False
     bundled_lower = {d.strip().lower() for d in (bundled_internal_deps or ()) if d and d.strip()}
@@ -510,24 +510,22 @@ def annotate_depends_on_line(
             has_ge = False
 
         if not has_ge and dep_name.lower() in bundled_lower:
-            annotated_tokens.append(token)
             continue
 
         latest_ver = lookup_dependency_addon_version(dep_name, filelist=filelist)
         if latest_ver is not None:
-            entry_str = f"{token} {lb}current: {latest_ver}{rb}"
+            entry_str = f"{token} {lb}{latest_ver}{rb}"
             if not has_ge:
                 has_missing = True
-                annotated_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
+                flagged_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
             elif declared_ver is not None and declared_ver < latest_ver:
                 has_outdated = True
-                annotated_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
-            else:
-                annotated_tokens.append(token)
-        else:
-            annotated_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
+                flagged_tokens.append(f'{lb}color="Red"{rb}{entry_str}{lb}/color{rb}')
+        elif not has_ge:
+            has_missing = True
+            flagged_tokens.append(f"{token} {lb}AddOnVersion unknown{rb}")
 
-    return f"{header.strip()}: {' '.join(annotated_tokens)}", has_missing, has_outdated
+    return ", ".join(flagged_tokens), has_missing, has_outdated
 
 
 def _version_to_tuple(ver_val: Any) -> Tuple[int, ...]:

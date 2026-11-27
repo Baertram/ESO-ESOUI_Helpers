@@ -152,7 +152,9 @@ class TestEsouiModularSmoke(unittest.TestCase):
         )
         self.assertTrue(has_missing)
         self.assertFalse(has_outdated)
-        self.assertIn("LibFilters-3.0 [current: 350]", line_missing)
+        self.assertNotIn("## DependsOn:", line_missing)
+        self.assertNotIn("LibAddonMenu-2.0>=43", line_missing)
+        self.assertIn("LibFilters-3.0 [350]", line_missing)
         self.assertIn("LibWhatever [AddOnVersion unknown]", line_missing)
 
         line_outdated, has_missing2, has_outdated2 = annotate_depends_on_line(
@@ -161,7 +163,8 @@ class TestEsouiModularSmoke(unittest.TestCase):
         )
         self.assertFalse(has_missing2)
         self.assertTrue(has_outdated2)
-        self.assertIn("LibAddonMenu-2.0>=38 [current: 43]", line_outdated)
+        self.assertNotIn("## DependsOn:", line_outdated)
+        self.assertIn("LibAddonMenu-2.0>=38 [43]", line_outdated)
 
         self.assertTrue(is_discontinued_or_outdated({"id": 3864, "title": "pChat Gamepad", "categoryId": 157}))
         self.assertFalse(is_discontinued_or_outdated({"id": 630, "title": "FCO ItemSaver", "categoryId": 24}))
@@ -238,6 +241,7 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 with open(tmp_path, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
                 self.assertIn("MyAddon.addon [MANIFEST]", rendered)
+                self.assertIn('[*] \\MyAddon.addon:16 [spoiler][SIZE="2"][color="Red"]LibFilters-3.0 [350][/color][/SIZE][/spoiler]' if ":16" in rendered else '[*] \\MyAddon.addon:2 [spoiler][SIZE="2"][color="Red"]LibFilters-3.0 [350][/color][/SIZE][/spoiler]', rendered)
                 self.assertIn("Core.lua", rendered)
                 self.assertNotIn(":mad: Clean.lua", rendered)
                 self.assertIn("[b]next[/b] (used 2 times without local reference)", rendered)
@@ -1649,20 +1653,25 @@ class TestEsouiModularSmoke(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".txt", encoding="utf-8") as tf:
             tmp_rep = tf.name
         try:
-            _render_final_bbcode_report(tmp_rep, "KpuiCore.zip", "2026-11-27 07:45:00 PM", report_data)
-            with open(tmp_rep, "r", encoding="utf-8") as rf:
-                rendered = rf.read()
-            self.assertLessEqual(len(rendered), 9999)
-            self.assertIn(f"{lb}trunc.{rb}", rendered)
-            for tag in ("b", "u", "i", "spoiler", "list"):
-                self.assertEqual(
-                    rendered.lower().count(f"{lb}{tag}{rb}"),
-                    rendered.lower().count(f"{lb}/{tag}{rb}"),
-                    f"Unbalanced BBCode tag [{tag}] after truncation",
-                )
+            part_files = _render_final_bbcode_report(tmp_rep, "KpuiCore.zip", "2026-11-27 07:45:00 PM", report_data)
+            self.assertGreater(len(part_files), 1)
+            for pf in part_files:
+                with open(pf, "r", encoding="utf-8") as prf:
+                    part_txt = prf.read()
+                self.assertLessEqual(len(part_txt), 9999)
+                self.assertNotIn(f"{lb}trunc.{rb}", part_txt)
+                for tag in ("b", "u", "i", "spoiler", "list"):
+                    self.assertEqual(
+                        part_txt.lower().count(f"{lb}{tag}{rb}"),
+                        part_txt.lower().count(f"{lb}/{tag}{rb}"),
+                        f"Unbalanced BBCode tag [{tag}] in split post {pf}",
+                    )
         finally:
-            if os.path.exists(tmp_rep):
-                os.remove(tmp_rep)
+            for cleanup_f in [tmp_rep] + [
+                f"{os.path.splitext(tmp_rep).__getitem__(0)}_part{i}.txt" for i in range(1, 20)
+            ]:
+                if os.path.exists(cleanup_f):
+                    os.remove(cleanup_f)
 
         # 3. Verify Grave()/Present() table constructor fields {rects = {}, labels = {}} are not flagged as global tables or leaks
         from src.esoui_lua_analyzer import collect_addon_context
@@ -1751,6 +1760,107 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertEqual(rendered.count('[*] Uncompressed RGBA/RGB'), 1)
             self.assertNotIn(':mad: tex_ok_dxt5.dds', rendered)
             self.assertNotIn(':mad: tex_ok_dxt3.dds', rendered)
+
+    def test_34_abbreviated_savedvariables_and_max_50_smilies_cap(self):
+        import zipfile
+        from src import esoui_ram_index
+        from src.esoui_ai_and_report import _check_zip_structure, _render_final_bbcode_report
+        from src.esoui_manifest_xml_analyzer import analyze_manifest_file
+
+        ctx = {
+            "has_bindings_xml": False,
+            "xml_content": "",
+            "all_global_tables": {"kpui"},
+            "saved_variables": {"kpuiSavedVariables"},
+            "root_addon_manifests": [],
+            "root_txt_manifests": ["KelaPadUIEnhanced.txt"],
+            "bundled_sub_addons": set(),
+        }
+        mf_ok = (
+            "## Title: KelaPadUIEnhanced\n"
+            "## APIVersion: 101051\n"
+            "## SavedVariables: kpuiSavedVariables\n"
+        )
+        mf_too_short = (
+            "## Title: KelaPadUIEnhanced\n"
+            "## APIVersion: 101051\n"
+            "## SavedVariables: kpSV\n"
+        )
+        with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+            "src.esoui_manifest_xml_analyzer.get_current_api_version", return_value="101051"
+        ):
+            res_ok = analyze_manifest_file("KelaPadUIEnhanced/KelaPadUIEnhanced.txt", mf_ok, ".txt", ctx)
+            res_short = analyze_manifest_file("KelaPadUIEnhanced/KelaPadUIEnhanced.txt", mf_too_short, ".txt", ctx)
+
+        self.assertNotIn("Non-unique / too short SavedVariables", res_ok)
+        self.assertIn("Non-unique / too short SavedVariables", res_short)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            zp = os.path.join(tmp_dir, "ManySmiliesAddon.zip")
+            with zipfile.ZipFile(zp, "w") as zf:
+                zf.writestr("ManySmiliesAddon/ManySmiliesAddon.txt", "## Title: ManySmiliesAddon\n")
+                for idx in range(1, 76):
+                    zf.writestr(f"ManySmiliesAddon/bad_file_{idx:03d}.exe", b"MZ")
+
+            rep = {
+                "zip_tree_bbcode": "",
+                "zip_violations": [],
+                "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+                "best_practices": defaultdict(list),
+            }
+            _check_zip_structure(zp, rep)
+            out_txt = os.path.join(tmp_dir, "report.txt")
+            _render_final_bbcode_report(out_txt, "ManySmiliesAddon.zip", "2026-11-27 11:02:00 PM", rep)
+            with open(out_txt, "r", encoding="utf-8") as rf:
+                rendered = rf.read()
+
+            total_smilies = rendered.lower().count(":mad:") + rendered.lower().count(":cool:")
+            self.assertLessEqual(total_smilies, 50)
+            self.assertEqual(rendered.lower().count(":mad:"), 49)
+            self.assertIn("[!] bad_file_", rendered)
+
+    def test_35_multi_post_report_splitting(self):
+        from src.esoui_ai_and_report import _render_final_bbcode_report
+
+        lb, rb = chr(91), chr(93)
+        huge_pollution = [
+            (f"KelaPadUIEnhanced/kpui_core/kpui_settings_{i:03d}.lua", i + 5, f"KelaLeakedVar{i}", f"KelaLeakedVar{i} = {i}")
+            for i in range(1, 220)
+        ]
+        report_data = {
+            "zip_all_entries": ["KelaPadUIEnhanced/", "KelaPadUIEnhanced/KelaPadUIEnhanced.txt"],
+            "zip_flagged_paths": set(),
+            "zip_manifest_paths": {"KelaPadUIEnhanced/KelaPadUIEnhanced.txt"},
+            "zip_tree_bbcode": "",
+            "zip_violations": [],
+            "global_var_pollution": huge_pollution,
+            "critical": {"manifest": defaultdict(list), "lua": defaultdict(list), "xml": defaultdict(list)},
+            "best_practices": {
+                "Possible action: Console UI Manifest Notice (.addon used instead of .txt)": [
+                    ("KelaPadUIEnhanced/KelaPadUIEnhanced.addon", "1", "")
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_rep = os.path.join(tmp_dir, "261127_231600_KelaPadUIEnhanced.txt")
+            part_files = _render_final_bbcode_report(base_rep, "KelaPadUIEnhanced.zip", "2026-11-27 11:16:00 PM", report_data)
+            self.assertGreaterEqual(len(part_files), 2)
+
+            combined_parts = ""
+            for idx, pf in enumerate(part_files, 1):
+                self.assertTrue(os.path.isfile(pf))
+                with open(pf, "r", encoding="utf-8") as rf:
+                    txt = rf.read()
+                self.assertLessEqual(len(txt), 9999)
+                self.assertNotIn(f"{lb}trunc.{rb}", txt)
+                if idx > 1:
+                    self.assertIn(f"Part {idx}/{len(part_files)}", txt)
+                combined_parts += txt
+
+            self.assertIn("KelaLeakedVar1", combined_parts)
+            self.assertIn("KelaLeakedVar219", combined_parts)
+            self.assertIn("Console UI Manifest Notice", combined_parts)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

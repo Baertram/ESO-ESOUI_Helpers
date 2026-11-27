@@ -60,13 +60,32 @@ LUA_KEYWORDS = {
 }
 NON_LANG_TWO_LETTER_STEMS = {"ui", "db", "sv", "io", "id", "os", "pc", "ps", "xb"}
 
-# Generic words in add-on/manifest names that alone are too weak to prove global/SavedVariables uniqueness
+# Generic words & SavedVariables suffixes that alone are too weak to prove global/SavedVariables uniqueness
+GENERIC_SV_SUFFIXES = (
+    "savedvariables",
+    "savedvars",
+    "saveddata",
+    "saved",
+    "settings",
+    "config",
+    "data",
+    "vars",
+    "db",
+    "sv",
+)
+
 GENERIC_ADDON_NAME_WORDS = frozenset({
-    "addon", "addons", "tracker", "helper", "helpers", "manager", "utils", "utility",
-    "system", "menu", "panel", "window", "frame", "timer", "timers", "alert", "alerts",
-    "buff", "debuff", "buffs", "debuffs", "saved", "vars", "savedvars", "config",
-    "settings", "options", "core", "main", "data", "info", "list", "bar", "bars",
-    "icon", "icons", "hud", "gui", "lib", "library", "mod", "plugin", "tool", "tools",
+    "addon", "addons", "alert", "alerts", "app", "bar", "bars", "base",
+    "buff", "buffs", "chat", "combat", "common", "core", "craft", "crafting",
+    "custom", "debuff", "debuffs", "debug", "default", "display", "frame",
+    "global", "globals", "group", "guild", "gui", "helper", "helpers", "hud",
+    "icon", "icons", "info", "item", "items", "lib", "library", "list", "loot",
+    "main", "manager", "map", "menu", "mod", "module", "myaddon", "options",
+    "panel", "player", "plugin", "profile", "profiles", "quest", "quests",
+    "raid", "saved", "saveddata", "savedvariables", "savedvars", "settings",
+    "shared", "simple", "stats", "status", "system", "test", "timer", "timers",
+    "tool", "tools", "tracker", "ui", "user", "util", "utility", "utils",
+    "vars", "window",
 })
 
 

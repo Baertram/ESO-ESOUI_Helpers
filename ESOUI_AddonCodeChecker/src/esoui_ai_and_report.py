@@ -380,6 +380,8 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_
         _prune_empty_dirs(tree)
 
     out_lines = [f'{lb}SIZE="2"{rb}{lb}list{rb}']
+    mad_smilies_used = [0]
+    max_tree_mad_smilies = 49
 
     def _walk(sub_tree, parent_path=""):
         items = sorted(sub_tree.items(), key=lambda kv: (kv[-1] is None, next(iter(kv)).lower()))
@@ -402,7 +404,12 @@ def _build_bbcode_zip_list(namelist, flagged_paths, manifest_paths=None, errors_
             if child is None and curr_path in manifest_norm:
                 display_name = f"{display_name} {lb}MANIFEST{rb}"
             if is_bad:
-                out_lines.append(f'{lb}*{rb} {lb}color="Red"{rb}:mad: {display_name}{lb}/color{rb}')
+                if mad_smilies_used.__getitem__(0) < max_tree_mad_smilies:
+                    mad_smilies_used[0] = mad_smilies_used.__getitem__(0) + 1
+                    bad_marker = ":mad:"
+                else:
+                    bad_marker = f"{lb}!{rb}"
+                out_lines.append(f'{lb}*{rb} {lb}color="Red"{rb}{bad_marker} {display_name}{lb}/color{rb}')
             else:
                 out_lines.append(f"{lb}*{rb} {display_name}")
             if child is not None:
@@ -1051,6 +1058,16 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 report_data["critical"][category]["Multiple Global Addon Tables"].append((rel_norm, None, tbl_detail))
                 continue
 
+            dep_missing_m = re.match(
+                r"^(Mandatory version check >= missing for non-optional dependency)\s*\(line\s+(\d+)\)\s*:\s*\((.+)\)\s*$",
+                item_text,
+            )
+            if dep_missing_m:
+                report_data["critical"][category][dep_missing_m.group(1).strip()].append(
+                    (rel_norm, dep_missing_m.group(2).strip(), dep_missing_m.group(3).strip())
+                )
+                continue
+
             line_match = re.search(r'\b(?:at\s+)?line\s+(\d+)\b', item_text, flags=re.IGNORECASE)
             line_no = line_match.group(1) if line_match else None
             rule_title = re.sub(r'\s*\((?:at\s+)?line\s+\d+\)|\s+at\s+line\s+\d+', '', item_text, flags=re.IGNORECASE)
@@ -1093,7 +1110,7 @@ def _parse_findings_into_report_data(rel_path, category, raw_result, report_data
                 elif "Mandatory version check >= outdated - consider an update" in bp_header:
                     bp_rule = "Possible action: Mandatory version check >= outdated - consider an update"
                     ln_m = re.search(r'\bline\s+(\d+)\b', bp_header, flags=re.IGNORECASE)
-                    c_m = re.search(r'\((##[^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', bp_header)
+                    c_m = re.search(r'\(([^()]+(?:\([^()]*\)[^()]*)*)\)\s*\.?$', bp_header)
                     report_data["best_practices"][bp_rule].append(
                         (rel_norm, ln_m.group(1) if ln_m else None, c_m.group(1).strip() if c_m else "")
                     )
@@ -1791,21 +1808,158 @@ def _enforce_report_char_limit(rendered_text, max_chars=ESOUI_COMMENT_MAX_CHARS)
     return cut_text + suffix
 
 
+def _cap_report_smilies(rendered_text, max_smilies=50):
+    """Ensures no more than max_smilies vBulletin smilies (:mad:, :cool:, etc.) appear in a single report."""
+    lb, rb = chr(91), chr(93)
+    smilie_rx = re.compile(r':(?:mad|cool|rolleyes|confused|eek|redface|biggrin|wink|tongue|frown|smile):', flags=re.IGNORECASE)
+    seen = [0]
+
+    def _repl(m):
+        seen[0] = seen.__getitem__(0) + 1
+        if seen.__getitem__(0) <= max_smilies:
+            return m.group(0)
+        return f"{lb}!{rb}"
+
+    return smilie_rx.sub(_repl, rendered_text)
+
+
+def _get_open_bbcode_tag_stack(text_fragment):
+    """Returns list of open vBulletin tags (preserving original tag + attribute, e.g. 'SIZE=\"2\"') in open order."""
+    lb, rb = chr(91), chr(93)
+    tag_rx = re.compile(
+        rf'{re.escape(lb)}(/?)((?:b|u|i|s|color|size|font|url|spoiler|list)(?:=[^\]\r\n]+)?){re.escape(rb)}',
+        flags=re.IGNORECASE,
+    )
+    open_stack = []
+    for m in tag_rx.finditer(text_fragment):
+        is_closing = bool(m.group(1))
+        full_tag = m.group(2)
+        base_low = full_tag.split("=", 1).__getitem__(0).lower()
+        if not is_closing:
+            open_stack.append(full_tag)
+        else:
+            for idx in range(len(open_stack) - 1, -1, -1):
+                if open_stack.__getitem__(idx).split("=", 1).__getitem__(0).lower() == base_low:
+                    del open_stack[idx:]
+                    break
+    return open_stack
+
+
+def _split_bbcode_report_into_posts(full_text, zip_name, timestamp_str, max_chars=ESOUI_COMMENT_MAX_CHARS):
+    """
+    Splits an oversized BBCode report cleanly on line boundaries into multiple valid vBulletin posts
+    (each <= max_chars and <= 50 smilies), closing open BBCode tags at the end of each post and
+    re-opening them at the start of the next post so nothing is ever lost with [trunc.].
+    """
+    lb, rb = chr(91), chr(93)
+    capped_full = _cap_report_smilies(full_text, max_smilies=50)
+    if len(capped_full) <= max_chars:
+        return [capped_full]
+
+    lines = full_text.splitlines()
+    raw_chunks = []
+    curr_lines = []
+    curr_len = 0
+    reopen_prefix_lines = []
+
+    def _part_header(part_idx):
+        return (
+            f'{lb}b{rb}{lb}u{rb}{lb}color="RoyalBlue"{rb}Addon check - report results (Part {part_idx}){lb}/color{rb}{lb}/u{rb}{lb}/b{rb}\n'
+            f'{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name} ({timestamp_str})\n\n'
+        )
+
+    footer_reserve = len(f"\n\n{lb}i{rb}(Continued in Part 99/99...){lb}/i{rb}\n") + 8
+    for ln in lines:
+        part_num = len(raw_chunks) + 1
+        header_overhead = len(_part_header(part_num + 10)) if part_num > 1 else 0
+        prospective_text = "\n".join(curr_lines + [ln])
+        open_tags_after = _get_open_bbcode_tag_stack(prospective_text)
+        closing_after = "".join(f"{lb}/{t.split('=', 1).__getitem__(0)}{rb}" for t in reversed(open_tags_after))
+        total_if_added = header_overhead + footer_reserve + len(prospective_text) + len(closing_after) + 4
+
+        if curr_lines and total_if_added > max_chars:
+            chunk_body = "\n".join(curr_lines).rstrip()
+            open_at_break = _get_open_bbcode_tag_stack(chunk_body)
+            close_seq = "".join(f"{lb}/{t.split('=', 1).__getitem__(0)}{rb}" for t in reversed(open_at_break))
+            if close_seq:
+                chunk_body = chunk_body + close_seq
+            raw_chunks.append(chunk_body)
+            reopen_prefix = "".join(f"{lb}{t}{rb}" for t in open_at_break)
+            curr_lines = [reopen_prefix + ln] if reopen_prefix else [ln]
+            curr_len = len(curr_lines.__getitem__(0))
+        else:
+            curr_lines.append(ln)
+            curr_len += len(ln) + 1
+
+    if curr_lines:
+        final_body = "\n".join(curr_lines).rstrip()
+        open_end = _get_open_bbcode_tag_stack(final_body)
+        if open_end:
+            final_body += "".join(f"{lb}/{t.split('=', 1).__getitem__(0)}{rb}" for t in reversed(open_end))
+        raw_chunks.append(final_body)
+
+    total_parts = len(raw_chunks)
+    final_posts = []
+    for idx, body_txt in enumerate(raw_chunks, 1):
+        if idx == 1:
+            post_txt = body_txt + f"\n\n{lb}i{rb}(Continued in Part 2/{total_parts}...){lb}/i{rb}\n"
+        else:
+            hdr = (
+                f'{lb}b{rb}{lb}u{rb}{lb}color="RoyalBlue"{rb}Addon check - report results (Part {idx}/{total_parts}){lb}/color{rb}{lb}/u{rb}{lb}/b{rb}\n'
+                f'{lb}b{rb}ANALYSIS FOR{lb}/b{rb}: {zip_name} ({timestamp_str})\n\n'
+            )
+            footer = f"\n\n{lb}i{rb}(Continued in Part {idx + 1}/{total_parts}...){lb}/i{rb}\n" if idx < total_parts else "\n"
+            post_txt = hdr + body_txt + footer
+        post_txt = _cap_report_smilies(post_txt, max_smilies=50)
+        if len(post_txt) > max_chars:
+            post_txt = _cap_report_smilies(_enforce_report_char_limit(post_txt, max_chars), max_smilies=50)
+        final_posts.append(post_txt)
+
+    return final_posts
+
+
 def _render_final_bbcode_report(report_file_path, zip_name, timestamp_str, report_data):
-    """Writes the compact, grouped ESOUI BBCode report, auto-compacting until <= ESOUI_COMMENT_MAX_CHARS."""
-    rendered = ""
+    """
+    Writes the ESOUI BBCode report. If compact levels fit within ESOUI_COMMENT_MAX_CHARS (9,999),
+    writes a single post; otherwise renders the full un-truncated report split into multiple
+    posts (<= 9,999 chars each) and writes both a combined overview file and individual _partN.txt files.
+    """
+    single_post_candidate = None
     for level, tree_errors_only in ((0, False), (1, False), (2, False), (3, False), (3, True), (4, True)):
-        rendered = _build_bbcode_report_text(
+        cand = _build_bbcode_report_text(
             zip_name, timestamp_str, report_data, compact_bp=level, errors_only_tree=tree_errors_only
         )
-        if len(rendered) <= ESOUI_COMMENT_MAX_CHARS:
+        cand = _cap_report_smilies(cand, max_smilies=50)
+        if len(cand) <= ESOUI_COMMENT_MAX_CHARS:
+            single_post_candidate = cand
             break
 
-    rendered = _enforce_report_char_limit(rendered, ESOUI_COMMENT_MAX_CHARS)
+    if single_post_candidate is not None:
+        with open(report_file_path, "w", encoding="utf-8") as wf:
+            wf.write(single_post_candidate)
+        return [report_file_path]
+
+    full_untruncated = _build_bbcode_report_text(
+        zip_name, timestamp_str, report_data, compact_bp=0, errors_only_tree=False
+    )
+    posts = _split_bbcode_report_into_posts(full_untruncated, zip_name, timestamp_str, ESOUI_COMMENT_MAX_CHARS)
+
+    base_no_ext, ext_str = os.path.splitext(report_file_path)
+    part_paths = []
+    combined_sections = []
+    for idx, post_body in enumerate(posts, 1):
+        part_file = f"{base_no_ext}_part{idx}{ext_str}"
+        with open(part_file, "w", encoding="utf-8") as pf:
+            pf.write(post_body)
+        part_paths.append(part_file)
+        combined_sections.append(
+            f"==================== ESOUI POST {idx}/{len(posts)} ({len(post_body)} chars) ====================\n{post_body.rstrip()}"
+        )
 
     with open(report_file_path, "w", encoding="utf-8") as wf:
-        wf.write(rendered)
+        wf.write("\n\n".join(combined_sections) + "\n")
 
+    return part_paths
 
 def _extract_primary_manifest_info(extract_dir, addon_ctx):
     """Extracts (addon_title, addon_version_num, version_str, manifest_stem) from the primary root manifest."""
@@ -2196,7 +2350,7 @@ def process_addon(
             report_data.get("zip_manifest_paths", set()),
         )
 
-    _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
+    generated_report_files = _render_final_bbcode_report(current_report_file, zip_name, timestamp_str, report_data)
 
     display_addon_name = (
         mf_title
@@ -2236,6 +2390,10 @@ def process_addon(
     clickable_zip_end = format_zip_display_link(zip_path, color=C.WHITE)
     osc_mark_end = "\033]133;D\033\\" if os.name == "nt" else ""
     print(f"\n{C.CYAN}[4/4] Report saved to:{C.RESET} {format_report_display_link(current_report_file)}{status_badge}")
+    if len(generated_report_files) > 1:
+        print(f"    {C.YELLOW}ℹ Report split into {len(generated_report_files)} ESOUI posts (max {ESOUI_COMMENT_MAX_CHARS} chars each):{C.RESET}")
+        for part_idx, part_fp in enumerate(generated_report_files, 1):
+            print(f"      - Post {part_idx}/{len(generated_report_files)}: {format_report_display_link(part_fp)}")
     print(f"{osc_mark_end}{C.CYAN}{C.BOLD}  ADDON END:   {clickable_zip_end}{C.CYAN} ({C.MAGENTA}{addon_duration:.2f}s{C.CYAN}){C.RESET}")
     print(f"{C.CYAN}{C.BOLD}=================================================================={C.RESET}\n")
     return summary_entry

@@ -10,10 +10,13 @@ from src.esoui_config import (
     ESO_BINDINGS_SCHEMA_FILE,
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
+    GENERIC_ADDON_NAME_WORDS,
+    GENERIC_SV_SUFFIXES,
     NON_LANG_TWO_LETTER_STEMS,
     extract_addon_anchor_tokens,
     resolve_config_file_path,
 )
+
 from src.esoui_config import CACHE_ADDONS_EXTRACTED_DIR, ESO_ADDONS_DIR
 from src.esoui_filelist_search import (
     annotate_depends_on_line,
@@ -54,11 +57,15 @@ def _check_manifest_line_lengths(content, manifest_issues):
 
 
 def _is_unique_addon_identifier(ident_name, addon_ctx=None, fallback_stem=None):
-    """Returns True if ident_name is >= 6 chars and clearly anchored to the addon/manifest/global-table name."""
-    if not ident_name or len(ident_name) < 6:
+    """
+    Returns True if ident_name is > 6 chars (at least 7 chars) and either:
+      - contains an anchor token from the addon/manifest/global-table name, OR
+      - uses a unique non-generic abbreviation/prefix of at least 3 chars (e.g. 'kpuiSavedVariables').
+    """
+    if not ident_name or len(ident_name) <= 6:
         return False
     norm_id = re.sub(r"[^a-z0-9]", "", ident_name.lower())
-    if len(norm_id) < 6:
+    if len(norm_id) <= 6:
         return False
 
     anchors = set()
@@ -66,7 +73,7 @@ def _is_unique_addon_identifier(ident_name, addon_ctx=None, fallback_stem=None):
         anchors.add(fallback_stem)
     if addon_ctx:
         for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
-            anchors.add(os.path.splitext(os.path.basename(mf))[0])
+            anchors.add(os.path.splitext(os.path.basename(mf)).__getitem__(0))
         for gt in (addon_ctx.get("all_global_tables") or ()):
             if len(gt) >= 6:
                 anchors.add(gt)
@@ -75,7 +82,24 @@ def _is_unique_addon_identifier(ident_name, addon_ctx=None, fallback_stem=None):
     for anc in anchors:
         norm_anchors.update(extract_addon_anchor_tokens(anc))
 
-    return any(anc in norm_id for anc in norm_anchors)
+    if any(anc in norm_id for anc in norm_anchors):
+        return True
+
+    stripped_core = norm_id
+    changed = True
+    while changed and stripped_core:
+        changed = False
+        for sfx in GENERIC_SV_SUFFIXES:
+            if stripped_core.endswith(sfx) and len(stripped_core) > len(sfx):
+                stripped_core = stripped_core[:-len(sfx)]
+                changed = True
+                break
+            if stripped_core.startswith(sfx) and len(stripped_core) > len(sfx):
+                stripped_core = stripped_core[len(sfx):]
+                changed = True
+                break
+
+    return len(stripped_core) >= 3 and stripped_core not in GENERIC_ADDON_NAME_WORDS
 
 
 def _check_manifest_saved_variables(file_name, line_num, line_str, manifest_issues, addon_ctx=None):
