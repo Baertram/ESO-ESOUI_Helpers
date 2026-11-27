@@ -11,6 +11,7 @@ from src.esoui_config import (
     ESO_XML_SCHEMA_FILE,
     EXTRACT_FOLDER,
     NON_LANG_TWO_LETTER_STEMS,
+    extract_addon_anchor_tokens,
     resolve_config_file_path,
 )
 from src.esoui_config import CACHE_ADDONS_EXTRACTED_DIR, ESO_ADDONS_DIR
@@ -72,12 +73,7 @@ def _is_unique_addon_identifier(ident_name, addon_ctx=None, fallback_stem=None):
 
     norm_anchors = set()
     for anc in anchors:
-        clean_a = re.sub(r"[^a-z0-9]", "", str(anc).lower())
-        if len(clean_a) >= 4:
-            norm_anchors.add(clean_a)
-            stripped_digits = re.sub(r"\d+$", "", clean_a)
-            if len(stripped_digits) >= 4:
-                norm_anchors.add(stripped_digits)
+        norm_anchors.update(extract_addon_anchor_tokens(anc))
 
     return any(anc in norm_id for anc in norm_anchors)
 

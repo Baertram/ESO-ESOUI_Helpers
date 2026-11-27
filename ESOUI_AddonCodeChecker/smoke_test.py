@@ -1396,6 +1396,170 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertNotIn("Open the window", res)
             self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", res)
 
+    def test_28_embedded_sub_addon_own_manifest_addon_loaded(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            main_dir = os.path.join(tmp_dir, "FurysGuildToolset")
+            sub_dir = os.path.join(main_dir, "FurysAddonMenu")
+            nested_lib_dir = os.path.join(main_dir, "libs", "LibWhatever")
+            os.makedirs(sub_dir, exist_ok=True)
+            os.makedirs(nested_lib_dir, exist_ok=True)
+
+            with open(os.path.join(main_dir, "FurysGuildToolset.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: Fury's Guild Toolset\n## APIVersion: 101051\nFurysGuildToolset.lua\n")
+            with open(os.path.join(sub_dir, "FurysAddonMenu.txt"), "w", encoding="utf-8") as smf:
+                smf.write("## Title: Fury's Addon Menu\n## IsLibrary: true\n## APIVersion: 101051\nFurysAddonMenu.lua\n")
+            with open(os.path.join(nested_lib_dir, "LibWhatever.txt"), "w", encoding="utf-8") as lmf:
+                lmf.write("## Title: LibWhatever\n## IsLibrary: true\n## APIVersion: 101051\nLibWhatever.lua\n")
+
+            main_lua = (
+                'local FGT = { name = "FurysGuildToolset" }\n'
+                'local function OnLoaded(_, addonName)\n'
+                '    if addonName ~= FGT.name then return end\n'
+                '    EVENT_MANAGER:UnregisterForEvent(FGT.name, EVENT_ADD_ON_LOADED)\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent(FGT.name, EVENT_ADD_ON_LOADED, OnLoaded)\n'
+            )
+            sub_lua = (
+                'if not rawget(_G, "FurysAddonMenu") then\n'
+                '    _G["FurysAddonMenu"] = { entries = {}, lib = 0 }\n'
+                'end\n'
+                'local function OnLoaded(_, name)\n'
+                '    if name ~= "FurysAddonMenu" then return end\n'
+                '    EVENT_MANAGER:UnregisterForEvent("FurysAddonMenu", EVENT_ADD_ON_LOADED)\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent("FurysAddonMenu", EVENT_ADD_ON_LOADED, OnLoaded)\n'
+            )
+            nested_lib_lua = (
+                'local function OnLoaded(_, name)\n'
+                '    if name ~= "LibWhatever" then return end\n'
+                '    EVENT_MANAGER:UnregisterForEvent("LibWhatever", EVENT_ADD_ON_LOADED)\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent("LibWhatever", EVENT_ADD_ON_LOADED, OnLoaded)\n'
+            )
+
+            with open(os.path.join(main_dir, "FurysGuildToolset.lua"), "w", encoding="utf-8") as f1:
+                f1.write(main_lua)
+            with open(os.path.join(sub_dir, "FurysAddonMenu.lua"), "w", encoding="utf-8") as f2:
+                f2.write(sub_lua)
+            with open(os.path.join(nested_lib_dir, "LibWhatever.lua"), "w", encoding="utf-8") as f3:
+                f3.write(nested_lib_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res_main = analyze_lua_file("FurysGuildToolset/FurysGuildToolset.lua", main_lua, tmp_dir, ctx)
+                res_sub = analyze_lua_file("FurysGuildToolset/FurysAddonMenu/FurysAddonMenu.lua", sub_lua, tmp_dir, ctx)
+                res_lib = analyze_lua_file("FurysGuildToolset/libs/LibWhatever/LibWhatever.lua", nested_lib_lua, tmp_dir, ctx)
+
+            for r_out in (res_main, res_sub, res_lib):
+                self.assertNotIn("EVENT_ADD_ON_LOADED check does not match", r_out)
+                self.assertNotIn("EVENT_ADD_ON_LOADED addonName", r_out)
+                self.assertNotIn("EVENT_ADD_ON_LOADED missing", r_out)
+                self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", r_out)
+
+    def test_29_addon_table_name_not_overwritten_by_other_table_name(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "CrutchAlerts")
+            os.makedirs(os.path.join(addon_dir, "main"), exist_ok=True)
+            with open(os.path.join(addon_dir, "CrutchAlerts.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: CrutchAlerts\n## APIVersion: 101051\nmain/CrutchAlerts.lua\nmain/Bosses.lua\n")
+
+            main_lua = (
+                'CrutchAlerts = {\n'
+                '    BossHealthBar = {},\n'
+                '    name = "CrutchAlerts",\n'
+                '    version = "2.29.0",\n'
+                '}\n'
+                'local Crutch = CrutchAlerts\n'
+                'local function OnAddOnLoaded(_, addonName)\n'
+                '    if (addonName == Crutch.name) then\n'
+                '        EVENT_MANAGER:UnregisterForEvent(Crutch.name, EVENT_ADD_ON_LOADED)\n'
+                '    end\n'
+                'end\n'
+                'EVENT_MANAGER:RegisterForEvent(Crutch.name, EVENT_ADD_ON_LOADED, OnAddOnLoaded)\n'
+            )
+            bosses_lua = (
+                'local bossEntry = {\n'
+                '    name = "Invulnerable Boss 5",\n'
+                '}\n'
+            )
+            with open(os.path.join(addon_dir, "main", "CrutchAlerts.lua"), "w", encoding="utf-8") as f1:
+                f1.write(main_lua)
+            with open(os.path.join(addon_dir, "main", "Bosses.lua"), "w", encoding="utf-8") as f2:
+                f2.write(bosses_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res = analyze_lua_file("CrutchAlerts/main/CrutchAlerts.lua", main_lua, tmp_dir, ctx)
+
+            self.assertNotIn("EVENT_ADD_ON_LOADED check does not match", res)
+            self.assertNotIn("EVENT_ADD_ON_LOADED addonName", res)
+            self.assertNotIn("EVENT_ADD_ON_LOADED missing", res)
+            self.assertNotIn("Unregister EVENT_ADD_ON_LOADED", res)
+
+    def test_30_partial_addon_name_pattern_matching_for_sv_and_globals(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+        from src.esoui_manifest_xml_analyzer import analyze_manifest_file
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "Ramaladni_buff_debuff_tracker")
+            os.makedirs(addon_dir, exist_ok=True)
+            manifest_txt = (
+                "## Title: Ramaladni's Buff & Debuff Tracker\n"
+                "## APIVersion: 101051\n"
+                "## SavedVariables: RamaladniTrackerSaved\n"
+                "RamaladniMastery.lua\n"
+                "Core.lua\n"
+            )
+            bad_manifest_txt = (
+                "## Title: Ramaladni's Buff & Debuff Tracker\n"
+                "## APIVersion: 101051\n"
+                "## SavedVariables: TrackerSaved\n"
+                "RamaladniMastery.lua\n"
+            )
+            with open(os.path.join(addon_dir, "Ramaladni_buff_debuff_tracker.txt"), "w", encoding="utf-8") as mf:
+                mf.write(manifest_txt)
+
+            good_lua = "RamaladniMastery = {\n    version = 1,\n}\n"
+            bad_lua = "TrackerCore = {\n    version = 1,\n}\n"
+            with open(os.path.join(addon_dir, "RamaladniMastery.lua"), "w", encoding="utf-8") as f1:
+                f1.write(good_lua)
+            with open(os.path.join(addon_dir, "Core.lua"), "w", encoding="utf-8") as f2:
+                f2.write(bad_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_manifest_xml_analyzer.get_current_api_version", return_value="101051"
+            ), patch("src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True), patch(
+                "src.esoui_lua_analyzer.collect_dependency_globals", return_value={}
+            ):
+                res_mf_ok = analyze_manifest_file(
+                    "Ramaladni_buff_debuff_tracker/Ramaladni_buff_debuff_tracker.txt", manifest_txt, ".txt", ctx
+                )
+                res_mf_bad = analyze_manifest_file(
+                    "Ramaladni_buff_debuff_tracker/Ramaladni_buff_debuff_tracker.txt", bad_manifest_txt, ".txt", ctx
+                )
+                res_lua_ok = analyze_lua_file(
+                    "Ramaladni_buff_debuff_tracker/RamaladniMastery.lua", good_lua, tmp_dir, ctx
+                )
+                res_lua_bad = analyze_lua_file(
+                    "Ramaladni_buff_debuff_tracker/Core.lua", bad_lua, tmp_dir, ctx
+                )
+
+            self.assertNotIn("Non-unique / too short SavedVariables", res_mf_ok)
+            self.assertIn("Non-unique / too short SavedVariables", res_mf_bad)
+            self.assertNotIn("Non-unique / too short global variable", res_lua_ok)
+            self.assertIn("Non-unique / too short global variable 'TrackerCore'", res_lua_bad)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

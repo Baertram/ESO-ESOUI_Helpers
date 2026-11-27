@@ -3,6 +3,7 @@ Globale Konfiguration, Pfade, Datei-Whitelists und Terminal-Helfer für esoui_co
 """
 
 import os
+import re
 import sys
 import shutil
 import textwrap
@@ -58,6 +59,42 @@ LUA_KEYWORDS = {
     "not", "while", "repeat", "until", "break", "do", "self", "_"
 }
 NON_LANG_TWO_LETTER_STEMS = {"ui", "db", "sv", "io", "id", "os", "pc", "ps", "xb"}
+
+# Generic words in add-on/manifest names that alone are too weak to prove global/SavedVariables uniqueness
+GENERIC_ADDON_NAME_WORDS = frozenset({
+    "addon", "addons", "tracker", "helper", "helpers", "manager", "utils", "utility",
+    "system", "menu", "panel", "window", "frame", "timer", "timers", "alert", "alerts",
+    "buff", "debuff", "buffs", "debuffs", "saved", "vars", "savedvars", "config",
+    "settings", "options", "core", "main", "data", "info", "list", "bar", "bars",
+    "icon", "icons", "hud", "gui", "lib", "library", "mod", "plugin", "tool", "tools",
+})
+
+
+def extract_addon_anchor_tokens(raw_name):
+    """Extracts normalized full-name and distinctive word/CamelCase anchor tokens (>= 5 chars) from an add-on name."""
+    anchors = set()
+    if not raw_name:
+        return anchors
+    text = str(raw_name).strip()
+    clean_full = re.sub(r"[^a-z0-9]", "", text.lower())
+    if len(clean_full) >= 4:
+        anchors.add(clean_full)
+        stripped_digits = re.sub(r"\d+$", "", clean_full)
+        if len(stripped_digits) >= 4:
+            anchors.add(stripped_digits)
+
+    # Split on delimiters (_ - space .) and CamelCase boundaries
+    camel_split = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    camel_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", camel_split)
+    for part in re.split(r"[^A-Za-z0-9]+", camel_split):
+        low_p = part.lower()
+        if len(low_p) >= 5 and not low_p.isdigit() and low_p not in GENERIC_ADDON_NAME_WORDS:
+            anchors.add(low_p)
+            p_no_digits = re.sub(r"\d+$", "", low_p)
+            if len(p_no_digits) >= 5 and p_no_digits not in GENERIC_ADDON_NAME_WORDS:
+                anchors.add(p_no_digits)
+    return anchors
+
 # Function names (e.g. 'GetLibAddonMenu' or 'LibCodesCommonCode.GetLibAddonMenu') where legacy LibStub checks are allowed
 LIBSTUB_EXCLUDED_FUNCTIONS = {
     "GetLibAddonMenu",

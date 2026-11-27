@@ -44,6 +44,7 @@ from src.esoui_config import (
     LUA_STD_LIBS,
     WIKI_EVENT_FILTERS_FILE,
     WIKI_LGB_IDS_TXT_FILE,
+    extract_addon_anchor_tokens,
     print_wrapped_tree_item,
     resolve_config_file_path,
 )
@@ -939,6 +940,7 @@ def collect_addon_context(extract_dir):
                         pass
 
         bundled_sub_addons = set()
+        manifest_dirs = {}
         global_tables_by_file = defaultdict(set)
         lua_texts_for_dyn_g = []
         lua_file_total = 0
@@ -954,7 +956,13 @@ def collect_addon_context(extract_dir):
                         with open(full_path, "r", encoding="utf-8", errors="ignore") as sub_mf:
                             sub_text = sub_mf.read()
                         if re.search(r"^\s*##\s*(?:Title|AddOnVersion)\s*:", sub_text, flags=re.MULTILINE | re.IGNORECASE):
-                            bundled_sub_addons.add(os.path.splitext(f)[0].lower())
+                            mf_stem_exact = os.path.splitext(f).__getitem__(0)
+                            bundled_sub_addons.add(mf_stem_exact.lower())
+                            rel_mf_dir = os.path.relpath(root, extract_dir).replace("\\", "/").strip("/")
+                            if rel_mf_dir == ".":
+                                rel_mf_dir = ""
+                            if rel_mf_dir not in manifest_dirs or lower_f.endswith(".addon"):
+                                manifest_dirs[rel_mf_dir] = mf_stem_exact
                             if re.search(r"^\s*##\s*IsLibrary\s*:\s*true\b", sub_text, flags=re.MULTILINE | re.IGNORECASE):
                                 is_library = True
                             for m_line in sub_text.splitlines():
@@ -1125,7 +1133,12 @@ def collect_addon_context(extract_dir):
         if primary_mf_stem:
             break
     addon_loaded_state = (
-        _collect_addon_loaded_state(lua_texts_for_dyn_g, all_global_tables, primary_mf_stem)
+        _collect_addon_loaded_state(
+            lua_texts_for_dyn_g,
+            all_global_tables,
+            primary_mf_stem,
+            addon_ctx={"manifest_dirs": manifest_dirs},
+        )
         if extract_dir and os.path.exists(extract_dir)
         else None
     )
@@ -1143,6 +1156,7 @@ def collect_addon_context(extract_dir):
         "root_addon_manifests": root_addon_manifests,
         "root_txt_manifests": root_txt_manifests,
         "bundled_sub_addons": bundled_sub_addons,
+        "manifest_dirs": manifest_dirs,
         "global_tables_by_file": dict(global_tables_by_file),
         "addon_loaded_state": addon_loaded_state,
     }
@@ -1690,6 +1704,7 @@ def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None,
     rx_tbl_field = re.compile(
         r"""^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"'\r\n]+)["']"""
     )
+    alias_to_target = {}
     rx_alias = re.compile(
         r"""\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)(?!\s*[.:\[(])\b"""
     )
@@ -1727,11 +1742,14 @@ def _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables=None,
                     for fm in rx_tbl_field.finditer(body):
                         k_name, v_str = fm.group(1), fm.group(2)
                         str_consts[f"{gt}.{k_name}"] = v_str
-                        if k_name.lower() in ("name", "addonname", "addon_name", "id"):
+                        if k_name.lower() == "name" and v_str == manifest_stem:
+                            str_consts[k_name] = v_str
+                        elif k_name.lower() in ("name", "addonname", "addon_name", "id"):
                             str_consts.setdefault(k_name, v_str)
 
         for am in rx_alias.finditer(clean_lua):
             alias_name, target_name = am.group(1), am.group(2)
+            alias_to_target[alias_name] = target_name
             if target_name in str_consts:
                 str_consts.setdefault(alias_name, str_consts[target_name])
             prefix = f"{target_name}."
@@ -1754,13 +1772,54 @@ def _resolve_lua_string_expr(expr, str_consts):
     if s in str_consts:
         return str_consts[s]
     if "." in s:
-        member = s.rsplit(".", 1)[-1]
+        owner_part, member = s.rsplit(".", 1)
+        if member == "name" and str_consts.get("__MANIFEST_STEM__"):
+            m_stem = str_consts.get("__MANIFEST_STEM__")
+            if owner_part == m_stem or f"{owner_part}.{member}" in str_consts:
+                return str_consts.get(f"{owner_part}.{member}", m_stem)
         if member in str_consts:
             return str_consts[member]
     return None
 
 
-def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, manifest_stem=""):
+def _resolve_owning_addon_name(file_name, addon_ctx, fallback_stem=""):
+    """Resolves the nearest enclosing valid manifest stem (e.g. embedded sub-addon/library folder) for file_name."""
+    norm_fn = (file_name or "").replace("\\", "/").strip("/")
+    manifest_dirs = (addon_ctx or {}).get("manifest_dirs") or {}
+    if manifest_dirs and norm_fn:
+        best_dir = None
+        best_stem = ""
+        for m_dir, m_stem in manifest_dirs.items():
+            clean_dir = (m_dir or "").replace("\\", "/").strip("/")
+            if not clean_dir:
+                if best_dir is None:
+                    best_dir = ""
+                    best_stem = m_stem
+            elif norm_fn.startswith(clean_dir + "/"):
+                if best_dir is None or len(clean_dir) > len(best_dir):
+                    best_dir = clean_dir
+                    best_stem = m_stem
+        if best_stem:
+            return best_stem
+    if fallback_stem:
+        return fallback_stem
+    if "/" in norm_fn:
+        return next(iter(norm_fn.split("/")))
+    return ""
+
+
+def _has_owning_manifest_dir(file_name, addon_ctx):
+    """Returns True if file_name resides inside a folder with its own valid .addon/.txt manifest."""
+    norm_fn = (file_name or "").replace("\\", "/").strip("/")
+    manifest_dirs = (addon_ctx or {}).get("manifest_dirs") or {}
+    for m_dir in manifest_dirs:
+        clean_dir = (m_dir or "").replace("\\", "/").strip("/")
+        if clean_dir and norm_fn.startswith(clean_dir + "/"):
+            return True
+    return False
+
+
+def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, manifest_stem="", addon_ctx=None):
     """Collects all EVENT_ADD_ON_LOADED RegisterForEvent/UnregisterForEvent calls and functions addon-wide."""
     str_consts = _collect_addon_string_symbols(lua_texts_by_rel_path, all_global_tables, manifest_stem)
     reg_rx = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.:()]*\s*:\s*)?RegisterForEvent\s*\(")
@@ -1769,11 +1828,28 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
     unregisters = []
     func_defs = {}
 
+    scoped_symbols_cache = {manifest_stem: str_consts}
+
+    def _get_scoped_symbols(owning_stem):
+        key = owning_stem or manifest_stem
+        if key not in scoped_symbols_cache:
+            scoped_files = [
+                (rp, cl) for rp, cl in lua_texts_by_rel_path
+                if _resolve_owning_addon_name(rp, addon_ctx, fallback_stem=manifest_stem) == key
+            ]
+            scoped_symbols_cache[key] = _collect_addon_string_symbols(
+                scoped_files or lua_texts_by_rel_path, all_global_tables, key
+            )
+        return scoped_symbols_cache[key]
+
     for rel_path, clean_lua in lua_texts_by_rel_path:
         rel_parts = [p.lower() for p in rel_path.replace("\\", "/").split("/")]
-        if any(p in ("lib", "libs", "libraries") for p in rel_parts):
+        if any(p in ("lib", "libs", "libraries") for p in rel_parts) and not _has_owning_manifest_dir(rel_path, addon_ctx):
             continue
         raw_lines = clean_lua.splitlines()
+        owning_stem = _resolve_owning_addon_name(rel_path, addon_ctx, fallback_stem=manifest_stem)
+        file_str_consts = _get_scoped_symbols(owning_stem)
+        str_consts.update(file_str_consts)
 
         for fn_key, (params, body, fn_ln, _) in _extract_all_lua_function_defs(clean_lua, all_global_tables).items():
             if "." in fn_key or ":" in fn_key:
@@ -1801,7 +1877,7 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
                 "file": rel_path,
                 "line": ln,
                 "ns_expr": ns_expr,
-                "ns_resolved": _resolve_lua_string_expr(ns_expr, str_consts),
+                "ns_resolved": _resolve_lua_string_expr(ns_expr, file_str_consts),
                 "cb_expr": cb_expr,
                 "cb_inline": cb_inline,
                 "code": orig_ln,
@@ -1821,7 +1897,7 @@ def _collect_addon_loaded_state(lua_texts_by_rel_path, all_global_tables=None, m
                 "file": rel_path,
                 "line": ln,
                 "ns_expr": ns_expr,
-                "ns_resolved": _resolve_lua_string_expr(ns_expr, str_consts),
+                "ns_resolved": _resolve_lua_string_expr(ns_expr, file_str_consts),
                 "code": orig_ln,
             })
 
@@ -1842,16 +1918,15 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
 
     norm_fn = file_name.replace("\\", "/")
     rel_parts = [p.lower() for p in norm_fn.split("/")]
-    if any(p in ("lib", "libs", "libraries") for p in rel_parts):
+    if any(p in ("lib", "libs", "libraries") for p in rel_parts) and not _has_owning_manifest_dir(norm_fn, addon_ctx):
         return
 
-    expected_addon_name = ""
+    root_fallback_name = ""
     for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
-        expected_addon_name = os.path.splitext(os.path.basename(mf)).__getitem__(0)
-        if expected_addon_name:
+        root_fallback_name = os.path.splitext(os.path.basename(mf)).__getitem__(0)
+        if root_fallback_name:
             break
-    if not expected_addon_name and "/" in norm_fn:
-        expected_addon_name = next(iter(norm_fn.split("/")))
+    expected_addon_name = _resolve_owning_addon_name(norm_fn, addon_ctx, fallback_stem=root_fallback_name)
 
     state = addon_ctx.get("addon_loaded_state")
     if state is None:
@@ -1859,6 +1934,7 @@ def _check_lua_addon_loaded_handling(file_name, content, raw_lines, addon_ctx, l
             [(norm_fn, clean_code)],
             all_global_tables=addon_ctx.get("all_global_tables"),
             manifest_stem=expected_addon_name,
+            addon_ctx=addon_ctx,
         )
         addon_ctx["addon_loaded_state"] = state
 
@@ -2352,17 +2428,14 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
 
     addon_anchors = set()
     for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):
-        clean_a = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(mf)).__getitem__(0).lower())
-        if len(clean_a) >= 4:
-            addon_anchors.add(clean_a)
-            stripped_digits = re.sub(r"\d+$", "", clean_a)
-            if len(stripped_digits) >= 4:
-                addon_anchors.add(stripped_digits)
-    if not addon_anchors and file_name:
-        first_seg = next(iter(file_name.replace("\\", "/").split("/")), "")
-        clean_seg = re.sub(r"[^a-z0-9]", "", os.path.splitext(first_seg).__getitem__(0).lower())
-        if len(clean_seg) >= 4:
-            addon_anchors.add(clean_seg)
+        addon_anchors.update(extract_addon_anchor_tokens(os.path.splitext(os.path.basename(mf)).__getitem__(0)))
+    if file_name:
+        owning_stem = _resolve_owning_addon_name(file_name, addon_ctx)
+        if owning_stem:
+            addon_anchors.update(extract_addon_anchor_tokens(owning_stem))
+        if not addon_anchors:
+            first_seg = next(iter(file_name.replace("\\", "/").split("/")), "")
+            addon_anchors.update(extract_addon_anchor_tokens(os.path.splitext(first_seg).__getitem__(0)))
 
     aliased_globals_in_file = set()
     polluted_globals_in_file = set()
