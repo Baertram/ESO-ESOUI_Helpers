@@ -2515,15 +2515,46 @@ def _check_lua_global_tables_and_locals(comment_free_lua, raw_lines, clean_lines
     is_library_addon = bool(addon_ctx.get("is_library"))
     lua_no_str_local = strip_lua_strings_preserve_lines(comment_free_lua)
     declared_file_locals = _collect_lua_local_identifiers(lua_no_str_local)
-    raw_table_matches = re.findall(
-        r'^(?<!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_]*\s*$)',
-        lua_no_str_local,
-        flags=re.MULTILINE,
+    global_table_matches = []
+    seen_tbl_matches = set()
+    tbl_brace_depth = 0
+    tbl_block_depth = 0
+    tbl_in_loop_hdr = False
+    tbl_tok_rx = re.compile(r'\b(function|if|for|while|repeat|do|end|until)\b')
+    top_tbl_rx = re.compile(
+        r'^\s*(?!local\s)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:\{|\1\s*or\s*\{|[A-Za-z_][A-Za-z0-9_]*\s*$)'
     )
-    global_table_matches = [
-        m for m in dict.fromkeys(raw_table_matches)
-        if m not in declared_file_locals and m not in ESOUI_GLOBAL_DEFINES
-    ]
+    for code_ln in lua_no_str_local.splitlines():
+        if tbl_brace_depth == 0 and tbl_block_depth == 0:
+            m_top_tbl = top_tbl_rx.match(code_ln)
+            if m_top_tbl:
+                tbl_cand = m_top_tbl.group(1)
+                if (
+                    tbl_cand not in seen_tbl_matches
+                    and tbl_cand not in declared_file_locals
+                    and tbl_cand not in ESOUI_GLOBAL_DEFINES
+                ):
+                    seen_tbl_matches.add(tbl_cand)
+                    global_table_matches.append(tbl_cand)
+        tbl_brace_depth = max(0, tbl_brace_depth + code_ln.count("{") - code_ln.count("}"))
+        for tm in tbl_tok_rx.finditer(code_ln):
+            kw = tm.group(1)
+            if kw in ("for", "while"):
+                tbl_block_depth += 1
+                tbl_in_loop_hdr = True
+            elif kw == "do":
+                if tbl_in_loop_hdr:
+                    tbl_in_loop_hdr = False
+                else:
+                    tbl_block_depth += 1
+            elif kw in ("repeat", "function", "if"):
+                tbl_block_depth += 1
+            elif kw == "until" and tbl_block_depth > 0:
+                tbl_block_depth -= 1
+            elif kw == "end" and tbl_block_depth > 0:
+                if tbl_in_loop_hdr:
+                    tbl_in_loop_hdr = False
+                tbl_block_depth -= 1
 
     addon_anchors = set()
     for mf in (addon_ctx.get("root_addon_manifests") or []) + (addon_ctx.get("root_txt_manifests") or []):

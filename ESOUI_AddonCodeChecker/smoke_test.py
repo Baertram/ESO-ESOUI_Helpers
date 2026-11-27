@@ -241,7 +241,10 @@ class TestEsouiModularSmoke(unittest.TestCase):
                 with open(tmp_path, "r", encoding="utf-8") as rf:
                     rendered = rf.read()
                 self.assertIn("MyAddon.addon [MANIFEST]", rendered)
-                self.assertIn('[*] \\MyAddon.addon:16 [spoiler][SIZE="2"][color="Red"]LibFilters-3.0 [350][/color][/SIZE][/spoiler]' if ":16" in rendered else '[*] \\MyAddon.addon:2 [spoiler][SIZE="2"][color="Red"]LibFilters-3.0 [350][/color][/SIZE][/spoiler]', rendered)
+                self.assertIn(
+                    '[*] \\MyAddon.addon:2 [spoiler][SIZE="2"][color="Red"]LibAddonMenu-2.0>=38 [43][/color], [color="Red"]LibFilters-3.0 [350][/color][/SIZE][/spoiler]',
+                    rendered,
+                )
                 self.assertIn("Core.lua", rendered)
                 self.assertNotIn(":mad: Clean.lua", rendered)
                 self.assertIn("[b]next[/b] (used 2 times without local reference)", rendered)
@@ -1860,6 +1863,48 @@ class TestEsouiModularSmoke(unittest.TestCase):
             self.assertIn("KelaLeakedVar1", combined_parts)
             self.assertIn("KelaLeakedVar219", combined_parts)
             self.assertIn("Console UI Manifest Notice", combined_parts)
+
+    def test_36_nested_data_table_keys_not_flagged_as_global_variables(self):
+        from src import esoui_ram_index
+        from src.esoui_lua_analyzer import analyze_lua_file, collect_addon_context
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            addon_dir = os.path.join(tmp_dir, "AntiquityAtlas")
+            os.makedirs(addon_dir, exist_ok=True)
+            with open(os.path.join(addon_dir, "AntiquityAtlas.txt"), "w", encoding="utf-8") as mf:
+                mf.write("## Title: AntiquityAtlas\n## APIVersion: 101051\nAntiquityAtlas.lua\nMapPinsData.lua\n")
+
+            main_lua = "AntiquityAtlas = AntiquityAtlas or {}\n"
+            data_lua = (
+                "local A = AntiquityAtlas\n"
+                "A.ResourceChests = {\n"
+                '["aba-loria_base"] = {\n'
+                "[1] = {{.339, .543}},\n"
+                "},\n"
+                "ui_map_frvfrstvlt02_base = {\n"
+                "[1] = {{.172, .616}, {.561, .385}},\n"
+                "},\n"
+                "ui_map_hofabricboss3_base = {\n"
+                "[1] = {{.378, .279}, {.501, .279}},\n"
+                "},\n"
+                "}\n"
+            )
+            with open(os.path.join(addon_dir, "AntiquityAtlas.lua"), "w", encoding="utf-8") as f1:
+                f1.write(main_lua)
+            with open(os.path.join(addon_dir, "MapPinsData.lua"), "w", encoding="utf-8") as f2:
+                f2.write(data_lua)
+
+            ctx = collect_addon_context(tmp_dir)
+            self.assertEqual(ctx.get("all_global_tables"), {"AntiquityAtlas"})
+
+            with patch.object(esoui_ram_index, "ESOUI_INDEX_BUILT", True), patch(
+                "src.esoui_lua_analyzer._WIKI_EVENT_FILTER_SESSION_LOADED", True
+            ), patch("src.esoui_lua_analyzer.collect_dependency_globals", return_value={}):
+                res = analyze_lua_file("AntiquityAtlas/MapPinsData.lua", data_lua, tmp_dir, ctx)
+
+            self.assertNotIn("Non-unique / too short global variable", res)
+            self.assertNotIn("Global Variable Pollution", res)
+            self.assertIn("[STATUS] PASS", res)
 
 
 if __name__ == "__main__":
